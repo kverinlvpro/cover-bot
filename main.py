@@ -242,25 +242,25 @@ def _build_request(data: dict) -> str:
     has_photos = bool(data.get("photo_ids"))
 
     design_part = (
-        f" Every concept must include: {design}." if design else ""
+        f" В каждой идее обязательно должен присутствовать {design}." if design else ""
     )
 
     points = [
-        f'1) Property badges with text: "{badges}".',
-        f"2) Volume badge: {volume}.",
-        f"3) Main headline: {headline}, subtitle: {subtitle}.",
+        f'1) Нужно сделать дополнительные плашки с преимуществами: "{badges}".',
+        f"2) Плашку с объёмом {volume}.",
+        f"3) Заголовок: {headline} и подзаголовок: {subtitle}.",
     ]
     if has_photos:
         points.append(
-            "4) Use the product packaging EXACTLY as shown in the reference image "
-            "— do not change shape, label, color or proportions."
+            "4) Товар (упаковку/банку) взять СТРОГО с референсного изображения "
+            "без каких-либо изменений формы, этикетки и цвета."
         )
-    points.append(f"{len(points) + 1}) Modern UX/UI design style.")
+    points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
 
     return (
-        f'Generate 10 creative, non-typical product cover ideas for a marketplace listing: "{product}".{design_part} '
-        f"Each idea must be a detailed prompt for Nano Banana Pro image generator. "
-        f"Each prompt must include:\n"
+        f'Мне нужно сделать 10 креативных нетипичных идей для продающей обложки карточки товара "{product}".{design_part} '
+        f"Каждую идею нужно расписать как тз промт для Nano Banana Pro. "
+        f"В каждое тз нужно добавить эти пункты:\n"
         + "\n".join(points)
     )
 
@@ -273,11 +273,10 @@ async def _tg_url(file_id: str) -> str | None:
         return None
 
 
-async def _send_image(target: Message, url: str, prompt_en: str, label: str, prompt_ru: str = ""):
+async def _send_image(target: Message, url: str, prompt: str, label: str):
     image_id = uuid.uuid4().hex[:10]
-    _image_store[image_id] = {"prompt": prompt_en, "url": url}
-    ru_part = f"\n\n{prompt_ru}" if prompt_ru else ""
-    caption = f"{label}{ru_part}\n\n<code>{prompt_en[:700]}</code>"
+    _image_store[image_id] = {"prompt": prompt, "url": url}
+    caption = f"{label}\n\n<i>{prompt[:800]}</i>"
     try:
         await target.answer_photo(
             photo=url,
@@ -325,14 +324,12 @@ async def run_pipeline(message: Message, data: dict):
 
     done = {"n": 0, "ok": 0}
 
-    async def gen_and_send(idx: int, item: dict):
-        prompt_en = item["en"]
-        prompt_ru = item.get("ru", "")
-        url = await piapi_client.generate_image(prompt_en, ref_urls or None)
+    async def gen_and_send(idx: int, prompt: str):
+        url = await piapi_client.generate_image(prompt, ref_urls or None)
         done["n"] += 1
         if url:
             done["ok"] += 1
-            await _send_image(message, url, prompt_en, f"Вариант {idx}/10", prompt_ru)
+            await _send_image(message, url, prompt, f"Вариант {idx}/10")
         else:
             await message.answer(f"Вариант {idx}: генерация не удалась.")
         try:
