@@ -1,8 +1,12 @@
 import re
 import json
 import base64
+import logging
+import httpx
 import anthropic
 import config
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """Ты — профессиональный дизайнер обложек для маркетплейсов (Ozon, Wildberries).
 
@@ -34,40 +38,115 @@ CARD_ANALYSIS_SYSTEM = (
     "из описания и характеристик товара."
 )
 
+_FETCH_AGENTS = [
+    # Mobile agents — маркетплейсы реже блокируют
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+
+
+def _extract_page_content(html: str) -> str:
+    jsonld = re.findall(
+        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>',
+        html, re.IGNORECASE,
+    )
+    jsonld_text = "\n".join(jsonld[:3])[:3000]
+    text = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    prefix = f"STRUCTURED DATA:\n{jsonld_text}\n\nPAGE TEXT:\n" if jsonld_text else ""
+    return prefix + text[:20000]
+
+
+async def _fetch_page(url: str) -> str:
+    for ua in _FETCH_AGENTS:
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as http:
+                r = await http.get(url, headers={
+                    "User-Agent": ua,
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+                    "Accept-Encoding": "gzip, deflate, br",
+                })
+                logger.info("_fetch_page status=%d url=%s", r.status_code, url[:80])
+                if r.status_code == 200:
+                    return _extract_page_content(r.text)
+        except Exception as e:
+            logger.warning("_fetch_page exception: %s", e)
+    return ""
+
 
 async def analyze_card(url: str) -> dict:
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
     tools = [{"type": "web_fetch_20260209", "name": "web_fetch"}]
-    messages = [{"role": "user", "content": f"Проанализируй карточку товара: {url}"}]
+    messages: list = [{"role": "user", "content": f"Проанализируй карточку товара: {url}"}]
+    last_text = ""
 
-    # Server-side tool loop: Anthropic executes web_fetch on their infrastructure
-    for _ in range(5):
-        response = await client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=2048,
-            tools=tools,
-            system=CARD_ANALYSIS_SYSTEM,
-            messages=messages,
+    for turn in range(5):
+        try:
+            response = await client.messages.create(
+                model="claude-sonnet-5",
+                max_tokens=2048,
+                tools=tools,
+                system=CARD_ANALYSIS_SYSTEM,
+                messages=messages,
+            )
+        except Exception as e:
+            logger.error("analyze_card API error turn=%d: %s", turn, e)
+            raise ValueError(f"Ошибка API (шаг {turn}): {e}")
+
+        logger.info(
+            "analyze_card turn=%d stop=%s blocks=%s",
+            turn, response.stop_reason,
+            [type(b).__name__ for b in response.content],
         )
 
         text = next((b.text for b in response.content if hasattr(b, "text")), "")
+        if text:
+            last_text = text
+            logger.info("analyze_card text=%s", text[:400])
 
         if text and "{" in text:
             clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
-            start = clean.find("{")
-            end = clean.rfind("}") + 1
-            if start >= 0 and end > start:
-                result = json.loads(clean[start:end])
-                if "name" in result and "utps" in result:
-                    return result
+            s = clean.find("{")
+            e = clean.rfind("}") + 1
+            if s >= 0 and e > s:
+                try:
+                    result = json.loads(clean[s:e])
+                    if "name" in result and "utps" in result:
+                        return result
+                except json.JSONDecodeError:
+                    pass
 
         if response.stop_reason == "tool_use":
             messages.append({"role": "assistant", "content": response.content})
+
+            tool_results = []
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "web_fetch":
+                    fetch_url = block.input.get("url", url)
+                    logger.info("analyze_card tool web_fetch url=%s", fetch_url)
+                    page = await _fetch_page(fetch_url)
+                    if not page:
+                        page = "Страница недоступна (HTTP 403). Данных нет."
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": page,
+                    })
+
+            if tool_results:
+                messages.append({"role": "user", "content": tool_results})
             continue
 
         break
 
-    raise ValueError("Claude не смог проанализировать карточку")
+    raise ValueError(
+        f"Не удалось извлечь данные карточки.\n"
+        f"Последний ответ Claude: {last_text[:300] or '(пусто)'}"
+    )
 
 
 async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[str]:
