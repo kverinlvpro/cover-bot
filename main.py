@@ -34,6 +34,7 @@ class CoverForm(StatesGroup):
     # === Existing card flow ===
     card_url = State()
     color_samples = State()          # wall paint: upload color samples
+    color_code = State()             # wall paint: optional color code (shared between flows)
     confirm_volume = State()
     edit_volume = State()
     utp_select = State()
@@ -121,6 +122,14 @@ CARD_FAIL_KB = ReplyKeyboardMarkup(
 COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✅ Готово")],
+        [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+COLOR_CODE_KB = ReplyKeyboardMarkup(
+    keyboard=[
         [KeyboardButton(text="Пропустить")],
         [KeyboardButton(text=RESTART_BTN)],
     ],
@@ -281,17 +290,10 @@ async def flexible_color_photo(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.flexible_color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
 async def flexible_color_done(message: Message, state: FSMContext):
-    data = await state.get_data()
-    count = len(data.get("color_photo_ids", []))
     if message.text == "Пропустить":
         await state.update_data(color_photo_ids=[])
-    logging.info("flexible_color_done: %d color photos stored", count)
-    await message.answer(
-        "Введите <b>название товара</b>:",
-        parse_mode="HTML",
-        reply_markup=RESTART_KB,
-    )
-    await state.set_state(CoverForm.product_name)
+    await state.update_data(flow="flexible")
+    await _ask_color_code(message, state)
 
 
 @dp.message(CoverForm.flexible_color_samples)
@@ -300,6 +302,50 @@ async def flexible_color_bad(message: Message):
         "Отправьте фото или нажмите «Готово» / «Пропустить».",
         reply_markup=COLOR_SAMPLES_KB,
     )
+
+
+# === COLOR CODE STEP (wall paint, both flows) ===
+
+async def _ask_color_code(message: Message, state: FSMContext):
+    await message.answer(
+        "Введите <b>код цвета краски</b> — или нажмите «Пропустить».\n\n"
+        "Принимаются любые форматы:\n"
+        "• <b>HEX</b> — #E8E0D0 <i>(рекомендуется, копируется из любого пикера)</i>\n"
+        "• <b>RAL</b> — RAL 9001\n"
+        "• <b>Pantone</b> — Pantone 11-0602 TCX\n"
+        "• <b>NCS</b> — NCS S 0502-Y\n\n"
+        "<i>Код цвета будет добавлен в каждый промт напрямую.</i>",
+        parse_mode="HTML",
+        reply_markup=COLOR_CODE_KB,
+    )
+    await state.set_state(CoverForm.color_code)
+
+
+@dp.message(CoverForm.color_code, F.text)
+async def step_color_code(message: Message, state: FSMContext):
+    text = message.text.strip()
+    color_code = None if text == "Пропустить" else text
+    await state.update_data(color_code=color_code)
+    data = await state.get_data()
+
+    if data.get("flow") == "card":
+        volume = data.get("volume_detected")
+        if volume:
+            await _ask_volume_confirm(message, volume)
+            await state.set_state(CoverForm.confirm_volume)
+        else:
+            await message.answer(
+                "Введите объём (например: 360г, 1л):",
+                reply_markup=RESTART_KB,
+            )
+            await state.set_state(CoverForm.edit_volume)
+    else:
+        await message.answer(
+            "Введите <b>название товара</b>:",
+            parse_mode="HTML",
+            reply_markup=RESTART_KB,
+        )
+        await state.set_state(CoverForm.product_name)
 
 
 # === EXISTING CARD FLOW ===
@@ -395,17 +441,8 @@ async def card_color_photo(message: Message, state: FSMContext):
 async def card_color_done(message: Message, state: FSMContext):
     if message.text == "Пропустить":
         await state.update_data(color_photo_ids=[])
-    data = await state.get_data()
-    volume = data.get("volume_detected")
-    if volume:
-        await _ask_volume_confirm(message, volume)
-        await state.set_state(CoverForm.confirm_volume)
-    else:
-        await message.answer(
-            "Введите объём (например: 360г, 1л):",
-            reply_markup=RESTART_KB,
-        )
-        await state.set_state(CoverForm.edit_volume)
+    await state.update_data(flow="card")
+    await _ask_color_code(message, state)
 
 
 @dp.message(CoverForm.color_samples)
@@ -602,6 +639,8 @@ def _build_request(data: dict) -> str:
         f" В каждой идее обязательно должен присутствовать {design}." if design else ""
     )
 
+    color_code = data.get("color_code")
+
     points = [
         f'1) Нужно сделать дополнительные плашки с преимуществами: "{badges}".',
         f"2) Плашку с объёмом {volume}.",
@@ -611,6 +650,11 @@ def _build_request(data: dict) -> str:
         points.append(
             "4) Товар (упаковку/банку) взять СТРОГО с референсного изображения "
             "без каких-либо изменений формы, этикетки и цвета."
+        )
+    if color_code:
+        points.append(
+            f"{len(points) + 1}) Точный код цвета краски на стенах: {color_code} — "
+            "использовать этот цвет для окрашенных поверхностей в каждом варианте."
         )
     points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
 
