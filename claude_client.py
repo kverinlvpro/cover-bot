@@ -116,6 +116,10 @@ def _extract_page_content(html: str) -> str:
     return prefix + text[:20000]
 
 
+_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
+_WARMUP_TIMEOUT = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=4.0)
+
+
 async def _fetch_page(url: str) -> str:
     from urllib.parse import urlparse
     parsed = urlparse(url)
@@ -123,10 +127,9 @@ async def _fetch_page(url: str) -> str:
 
     for cfg in _BROWSER_CONFIGS:
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=25) as http:
-                # Warm up with homepage to get cookies + look like a real browser session
+            async with httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as http:
                 try:
-                    await http.get(base_url, headers=cfg, timeout=10)
+                    await http.get(base_url, headers=cfg, timeout=_WARMUP_TIMEOUT)
                 except Exception:
                     pass
                 r = await http.get(url, headers={**cfg, "Referer": base_url})

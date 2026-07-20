@@ -367,7 +367,11 @@ async def step_card_url(message: Message, state: FSMContext):
     status = await message.answer("⏳ Анализирую карточку товара…")
 
     try:
-        analysis = await claude_client.analyze_card(url)
+        analysis = await asyncio.wait_for(claude_client.analyze_card(url), timeout=75)
+    except asyncio.TimeoutError:
+        await status.edit_text("❌ Анализ карточки занял слишком долго — сайт не отвечает.")
+        await message.answer("Что делаем дальше?", reply_markup=CARD_FAIL_KB)
+        return
     except Exception as e:
         await status.edit_text(f"❌ Не удалось проанализировать карточку:\n{e}")
         await message.answer("Что делаем дальше?", reply_markup=CARD_FAIL_KB)
