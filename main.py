@@ -109,6 +109,15 @@ PAINT_TYPE_KB = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+CARD_FAIL_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔄 Попробовать ещё раз")],
+        [KeyboardButton(text="⚙️ Гибкая настройка")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
 COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✅ Готово")],
@@ -295,6 +304,17 @@ async def flexible_color_bad(message: Message):
 
 # === EXISTING CARD FLOW ===
 
+@dp.message(CoverForm.card_url, F.text == "🔄 Попробовать ещё раз")
+async def card_url_retry(message: Message):
+    await message.answer("Отправьте ссылку ещё раз:", reply_markup=RESTART_KB)
+
+
+@dp.message(CoverForm.card_url, F.text == "⚙️ Гибкая настройка")
+async def card_url_switch_flexible(message: Message, state: FSMContext):
+    await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
+    await state.set_state(CoverForm.paint_type_select)
+
+
 @dp.message(CoverForm.card_url, F.text)
 async def step_card_url(message: Message, state: FSMContext):
     url = message.text.strip()
@@ -303,9 +323,8 @@ async def step_card_url(message: Message, state: FSMContext):
     try:
         analysis = await claude_client.analyze_card(url)
     except Exception as e:
-        await status.edit_text(
-            f"❌ Не удалось проанализировать карточку:\n{e}\n\nПопробуйте ещё раз."
-        )
+        await status.edit_text(f"❌ Не удалось проанализировать карточку:\n{e}")
+        await message.answer("Что делаем дальше?", reply_markup=CARD_FAIL_KB)
         return
 
     name = analysis.get("name", "Неизвестно")
