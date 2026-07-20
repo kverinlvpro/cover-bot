@@ -3,26 +3,25 @@ import base64
 import anthropic
 import config
 
-SYSTEM_PROMPT = """Ты — профессиональный дизайнер обложек для маркетплейсов (Ozon, Wildberries).
+SYSTEM_PROMPT = """You are a professional marketplace cover designer (Ozon, Wildberries).
 
-Задача: по запросу пользователя сгенерировать ровно 10 уникальных промтов для нейросети Nano Banana Pro (Google Gemini image generator).
+Task: Based on the user's request, generate exactly 10 unique prompts for the Nano Banana Pro neural network (Google Gemini image generator).
 
-Правила:
-1. Каждый промт — на РУССКОМ языке
-2. Каждый промт описывает УНИКАЛЬНУЮ концепцию: разная композиция, фон, настроение, ракурс
-3. Все обязательные элементы из запроса пользователя присутствуют В КАЖДОМ промте
-4. Текстовые оверлеи описывай как: UI-плашка с текстом "текст"
-5. КРИТИЧЕСКИ ВАЖНО про референс товара: если есть референсное изображение — упаковка товара должна быть скопирована С РЕФЕРЕНСА ТОЧЬ-В-ТОЧЬ, без каких-либо изменений формы, этикетки, цвета, пропорций и дизайна. В промте пиши: "упаковка товара скопирована точно с референсного изображения, форма и этикетка без изменений"
-6. Каждый промт заканчивай на: "Вертикальный формат 3:4, современный UX/UI дизайн, высококачественная коммерческая обложка для маркетплейса"
+Rules:
+1. Each prompt MUST be in ENGLISH
+2. Each prompt describes a UNIQUE concept: different composition, background, mood, angle
+3. All required elements from the user's request are present in EVERY prompt
+4. Text overlays are described as: UI badge with text "text"
+5. CRITICAL — reference image: if a reference image is provided, the product packaging must be copied EXACTLY from the reference without any changes to shape, label, color, or proportions. Write in the prompt: "product packaging copied exactly from the reference image, shape and label unchanged"
+6. End each prompt with: "Vertical 3:4 format, modern UX/UI design, high-quality commercial marketplace cover"
 
-Структура каждого промта:
-[Творческая концепция/сцена] + [Расположение товара с точной копией упаковки с референса] + [Обязательные визуальные элементы] + [UI текстовые элементы] + [Стиль и формат]
+For each prompt also provide a SHORT Russian description of the concept (1-2 sentences) so the user understands the idea.
 
-Верни ТОЛЬКО JSON-массив из 10 строк, без пояснений и markdown:
-["промт 1", "промт 2", ..., "промт 10"]"""
+Return ONLY a JSON array of 10 objects, no explanations or markdown:
+[{"en": "english prompt here", "ru": "русское описание концепции"}, ...]"""
 
 
-async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[str]:
+async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[dict]:
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
 
     content: list = []
@@ -39,7 +38,7 @@ async def generate_prompts(user_request: str, image_bytes: bytes | None = None) 
         })
         content.append({
             "type": "text",
-            "text": f"Референсное фото товара выше.\n\n{user_request}"
+            "text": f"Reference product photo above.\n\n{user_request}"
         })
     else:
         content.append({"type": "text", "text": user_request})
@@ -53,14 +52,13 @@ async def generate_prompts(user_request: str, image_bytes: bytes | None = None) 
 
     raw = next(block.text for block in response.content if hasattr(block, "text")).strip()
 
-    # Вырезаем JSON даже если модель добавила лишний текст
     start = raw.find("[")
     end = raw.rfind("]") + 1
     if start == -1 or end == 0:
-        raise ValueError(f"Claude не вернул JSON-массив:\n{raw[:300]}")
+        raise ValueError(f"Claude did not return a JSON array: {raw[:300]}")
 
     prompts = json.loads(raw[start:end])
     if not isinstance(prompts, list) or len(prompts) != 10:
-        raise ValueError(f"Ожидалось 10 промтов, получено {len(prompts)}")
+        raise ValueError(f"Expected 10 prompts, got {len(prompts)}")
 
     return prompts
