@@ -23,8 +23,11 @@ SYSTEM_PROMPT = """Ты — профессиональный дизайнер о
 Структура каждого промта:
 [Творческая концепция/сцена] + [Расположение товара с точной копией упаковки] + [Визуальные элементы] + [UI текстовые плашки] + [Стиль и формат]
 
-Верни ТОЛЬКО JSON-массив из 10 строк, без пояснений и markdown:
-["промт 1", "промт 2", ..., "промт 10"]"""
+Верни ровно 10 промтов в виде нумерованного списка — без JSON, без markdown, без пояснений:
+1. промт один
+2. промт два
+...
+10. промт десять"""
 
 
 CARD_ANALYSIS_SYSTEM = (
@@ -180,14 +183,15 @@ async def generate_prompts(user_request: str, image_bytes: bytes | None = None) 
 
     raw = next(block.text for block in response.content if hasattr(block, "text")).strip()
 
-    start = raw.find("[")
-    end = raw.rfind("]") + 1
-    if start == -1 or end == 0:
-        raise ValueError(f"Claude не вернул JSON-массив: {raw[:300]}")
+    # Парсим нумерованный список: "1. текст", "2. текст" ...
+    prompts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        m = re.match(r'^\d{1,2}[.)]\s+(.+)$', line)
+        if m:
+            prompts.append(m.group(1).strip())
 
-    json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', raw[start:end])
-    prompts = json.loads(json_str)
-    if not isinstance(prompts, list) or len(prompts) != 10:
-        raise ValueError(f"Ожидалось 10 промтов, получено {len(prompts)}")
+    if len(prompts) < 8:
+        raise ValueError(f"Claude вернул только {len(prompts)} промтов из 10. Ответ: {raw[:300]}")
 
-    return prompts
+    return prompts[:10]
