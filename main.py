@@ -242,25 +242,25 @@ def _build_request(data: dict) -> str:
     has_photos = bool(data.get("photo_ids"))
 
     design_part = (
-        f" В каждой идее обязательно должен присутствовать {design}." if design else ""
+        f" Every concept must include: {design}." if design else ""
     )
 
     points = [
-        f'1) Нужно сделать дополнительные плашки с преимуществами: "{badges}".',
-        f"2) Плашку с объёмом {volume}.",
-        f"3) Заголовок: {headline} и подзаголовок: {subtitle}.",
+        f'1) Property badges with text: "{badges}".',
+        f"2) Volume badge: {volume}.",
+        f"3) Main headline: {headline}, subtitle: {subtitle}.",
     ]
     if has_photos:
         points.append(
-            "4) Товар (упаковку/банку) взять СТРОГО с референсного изображения "
-            "без каких-либо изменений формы, этикетки и цвета."
+            "4) Use the product packaging EXACTLY as shown in the reference image "
+            "— do not change shape, label, color or proportions."
         )
-    points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
+    points.append(f"{len(points) + 1}) Modern UX/UI design style.")
 
     return (
-        f'Мне нужно сделать 10 креативных нетипичных идей для продающей обложки карточки товара "{product}".{design_part} '
-        f"Каждую идею нужно расписать как тз промт для Nano Banana Pro. "
-        f"В каждое тз нужно добавить эти пункты:\n"
+        f'Generate 10 creative, non-typical product cover ideas for a marketplace listing: "{product}".{design_part} '
+        f"Each idea must be a detailed prompt for Nano Banana Pro image generator. "
+        f"Each prompt must include:\n"
         + "\n".join(points)
     )
 
