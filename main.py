@@ -133,7 +133,7 @@ async def _start_form(message: Message, state: FSMContext):
         "Отправьте <b>референсное фото товара</b> (упаковка/банка).\n"
         "Этот шаг обязателен — пропустить нельзя.",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.ref_photo)
 
