@@ -33,6 +33,7 @@ class CoverForm(StatesGroup):
 
     # === Existing card flow ===
     card_url = State()
+    color_samples = State()          # wall paint: upload color samples
     confirm_volume = State()
     edit_volume = State()
     utp_select = State()
@@ -40,6 +41,8 @@ class CoverForm(StatesGroup):
     card_subtitle = State()
 
     # === Flexible flow ===
+    paint_type_select = State()      # manual paint type selection
+    flexible_color_samples = State() # wall paint color samples in flexible mode
     product_name = State()
     volume = State()
     headline = State()
@@ -87,10 +90,29 @@ SKIP_KB = _kb("Пропустить", RESTART_BTN)
 START_KB = _kb("🚀 Запустить бот")
 AGAIN_KB = _kb("🔄 Сгенерировать ещё")
 RESTART_KB = _kb(RESTART_BTN)
+
 MODE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔗 На существующую карточку")],
         [KeyboardButton(text="⚙️ Гибкая настройка")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+PAINT_TYPE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🪑 Краска для мебели")],
+        [KeyboardButton(text="🏠 Краска для стен")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✅ Готово")],
+        [KeyboardButton(text="Пропустить")],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -191,11 +213,84 @@ async def mode_existing_card(message: Message, state: FSMContext):
 @dp.message(CoverForm.mode_select, F.text == "⚙️ Гибкая настройка")
 async def mode_flexible(message: Message, state: FSMContext):
     await message.answer(
+        "Выберите тип краски:",
+        reply_markup=PAINT_TYPE_KB,
+    )
+    await state.set_state(CoverForm.paint_type_select)
+
+
+# === FLEXIBLE FLOW: paint type selection ===
+
+@dp.message(CoverForm.paint_type_select, F.text.in_({"🪑 Краска для мебели", "🏠 Краска для стен"}))
+async def step_paint_type_select(message: Message, state: FSMContext):
+    paint_type = "walls" if "стен" in message.text else "furniture"
+    await state.update_data(paint_type=paint_type, color_photo_ids=[])
+
+    if paint_type == "walls":
+        await message.answer(
+            "🎨 <b>Краска для стен</b> — загрузите образец цвета и живые фото краски.\n"
+            "Можно отправить до 4 фото по одному.\n"
+            "Когда всё загружено — нажмите «Готово».\n"
+            "Или нажмите «Пропустить».",
+            parse_mode="HTML",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        await state.set_state(CoverForm.flexible_color_samples)
+    else:
+        await message.answer(
+            "Введите <b>название товара</b>:",
+            parse_mode="HTML",
+            reply_markup=RESTART_KB,
+        )
+        await state.set_state(CoverForm.product_name)
+
+
+@dp.message(CoverForm.paint_type_select)
+async def step_paint_type_bad(message: Message):
+    await message.answer("Выберите тип краски с помощью кнопок:", reply_markup=PAINT_TYPE_KB)
+
+
+# === FLEXIBLE FLOW: color samples (wall paint) ===
+
+@dp.message(CoverForm.flexible_color_samples, F.photo)
+async def flexible_color_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    ids = list(data.get("color_photo_ids", []))
+    if len(ids) >= 4:
+        await message.answer(
+            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        return
+    ids.append(message.photo[-1].file_id)
+    await state.update_data(color_photo_ids=ids)
+    await message.answer(
+        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.flexible_color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
+async def flexible_color_done(message: Message, state: FSMContext):
+    data = await state.get_data()
+    count = len(data.get("color_photo_ids", []))
+    if message.text == "Пропустить":
+        await state.update_data(color_photo_ids=[])
+    logging.info("flexible_color_done: %d color photos stored", count)
+    await message.answer(
         "Введите <b>название товара</b>:",
         parse_mode="HTML",
         reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.product_name)
+
+
+@dp.message(CoverForm.flexible_color_samples)
+async def flexible_color_bad(message: Message):
+    await message.answer(
+        "Отправьте фото или нажмите «Готово» / «Пропустить».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
 
 
 # === EXISTING CARD FLOW ===
@@ -215,25 +310,39 @@ async def step_card_url(message: Message, state: FSMContext):
 
     name = analysis.get("name", "Неизвестно")
     volume = analysis.get("volume")
+    paint_type = analysis.get("paint_type", "furniture")
     utps = analysis.get("utps", [])
 
-    await state.update_data(product_name=name, utp_list=utps, utp_selected=[])
+    await state.update_data(
+        product_name=name,
+        utp_list=utps,
+        utp_selected=[],
+        paint_type=paint_type,
+        color_photo_ids=[],
+    )
+    if volume:
+        await state.update_data(volume_detected=volume)
 
+    paint_label = "🏠 для стен" if paint_type == "walls" else "🪑 для мебели"
     await status.edit_text(
-        f"✅ Карточка проанализирована\n\n<b>Название:</b> {name}",
+        f"✅ Карточка проанализирована\n\n"
+        f"<b>Название:</b> {name}\n"
+        f"<b>Тип краски:</b> {paint_label}",
         parse_mode="HTML",
     )
 
-    if volume:
-        await state.update_data(volume_detected=volume)
+    if paint_type == "walls":
         await message.answer(
-            f"Объём: <b>{volume}</b> — верно?",
+            "🎨 <b>Краска для стен</b> — загрузите образец цвета и живые фото краски.\n"
+            "Можно отправить до 4 фото по одному.\n"
+            "Когда всё загружено — нажмите «Готово».\n"
+            "Или нажмите «Пропустить».",
             parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Верно", callback_data=VolConfirmCallback(ok=True).pack())],
-                [InlineKeyboardButton(text="✏️ Исправить", callback_data=VolConfirmCallback(ok=False).pack())],
-            ]),
+            reply_markup=COLOR_SAMPLES_KB,
         )
+        await state.set_state(CoverForm.color_samples)
+    elif volume:
+        await _ask_volume_confirm(message, volume)
         await state.set_state(CoverForm.confirm_volume)
     else:
         await message.answer(
@@ -241,6 +350,62 @@ async def step_card_url(message: Message, state: FSMContext):
             reply_markup=RESTART_KB,
         )
         await state.set_state(CoverForm.edit_volume)
+
+
+# Color samples step in existing card flow (wall paint)
+
+@dp.message(CoverForm.color_samples, F.photo)
+async def card_color_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    ids = list(data.get("color_photo_ids", []))
+    if len(ids) >= 4:
+        await message.answer(
+            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        return
+    ids.append(message.photo[-1].file_id)
+    await state.update_data(color_photo_ids=ids)
+    await message.answer(
+        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
+async def card_color_done(message: Message, state: FSMContext):
+    if message.text == "Пропустить":
+        await state.update_data(color_photo_ids=[])
+    data = await state.get_data()
+    volume = data.get("volume_detected")
+    if volume:
+        await _ask_volume_confirm(message, volume)
+        await state.set_state(CoverForm.confirm_volume)
+    else:
+        await message.answer(
+            "Введите объём (например: 360г, 1л):",
+            reply_markup=RESTART_KB,
+        )
+        await state.set_state(CoverForm.edit_volume)
+
+
+@dp.message(CoverForm.color_samples)
+async def card_color_bad(message: Message):
+    await message.answer(
+        "Отправьте фото или нажмите «Готово» / «Пропустить».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+async def _ask_volume_confirm(message: Message, volume: str):
+    await message.answer(
+        f"Объём: <b>{volume}</b> — верно?",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Верно", callback_data=VolConfirmCallback(ok=True).pack())],
+            [InlineKeyboardButton(text="✏️ Исправить", callback_data=VolConfirmCallback(ok=False).pack())],
+        ]),
+    )
 
 
 @dp.callback_query(VolConfirmCallback.filter(), CoverForm.confirm_volume)
@@ -466,6 +631,8 @@ async def _send_image(target: Message, url: str, prompt: str, label: str):
 async def run_pipeline(message: Message, data: dict):
     user_request = _build_request(data)
     photo_ids: list[str] = data.get("photo_ids", [])
+    color_photo_ids: list[str] = data.get("color_photo_ids", [])
+    paint_type: str = data.get("paint_type", "furniture")
 
     status = await message.answer("Генерирую промты через Claude…")
 
@@ -478,8 +645,23 @@ async def run_pipeline(message: Message, data: dict):
         except Exception:
             pass
 
+    color_image_bytes: list[bytes] = []
+    if paint_type == "walls" and color_photo_ids:
+        for fid in color_photo_ids[:4]:
+            try:
+                file = await bot.get_file(fid)
+                buf = await bot.download_file(file.file_path)
+                color_image_bytes.append(buf.read())
+            except Exception:
+                pass
+
     try:
-        prompts = await claude_client.generate_prompts(user_request, image_bytes)
+        prompts = await claude_client.generate_prompts(
+            user_request,
+            image_bytes,
+            color_image_bytes or None,
+            paint_type,
+        )
     except Exception as e:
         await status.edit_text(f"Ошибка генерации промтов: {e}")
         return
