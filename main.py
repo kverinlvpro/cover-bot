@@ -62,6 +62,8 @@ def _kb(*labels: str) -> ReplyKeyboardMarkup:
 
 SKIP_KB = _kb("Пропустить")
 DONE_SKIP_KB = _kb("Готово", "Пропустить")
+START_KB = _kb("🚀 Запустить бот")
+AGAIN_KB = _kb("🔄 Сгенерировать ещё")
 
 
 def _image_kb(image_id: str) -> InlineKeyboardMarkup:
@@ -79,17 +81,30 @@ def _image_kb(image_id: str) -> InlineKeyboardMarkup:
 
 # --- /start и /cancel ---
 
-@dp.message(CommandStart())
-async def cmd_start(message: Message, state: FSMContext):
+async def _start_form(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "<b>Cover Bot — генератор обложек для маркетплейсов</b>\n\n"
-        "Отвечайте на вопросы по очереди — в конце получите 10 уникальных обложек.\n\n"
         "Введите <b>название товара</b>:",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )
     await state.set_state(CoverForm.product_name)
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "<b>Cover Bot — генератор обложек для маркетплейсов</b>\n\n"
+        "Нажмите кнопку ниже, чтобы начать создание обложек.",
+        parse_mode="HTML",
+        reply_markup=START_KB,
+    )
+
+
+@dp.message(F.text.in_({"🚀 Запустить бот", "🔄 Сгенерировать ещё"}))
+async def btn_start_or_again(message: Message, state: FSMContext):
+    await _start_form(message, state)
 
 
 @dp.message(Command("cancel"))
@@ -343,6 +358,10 @@ async def run_pipeline(message: Message, data: dict):
         await status.edit_text(f"Готово! Сгенерировано {done['ok']}/10 обложек.")
     except Exception:
         pass
+    await message.answer(
+        "Хотите сделать ещё одну серию?",
+        reply_markup=AGAIN_KB,
+    )
 
 
 # --- Кнопка «Размножить идею» ---
