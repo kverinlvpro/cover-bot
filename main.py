@@ -1,12 +1,4 @@
 import sys
-import io
-
-# Force UTF-8 output — Railway runs with C/ASCII locale by default
-if isinstance(sys.stdout, io.TextIOWrapper):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if isinstance(sys.stderr, io.TextIOWrapper):
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
-
 import asyncio
 import logging
 import uuid
@@ -27,12 +19,7 @@ import config
 import claude_client
 import piapi_client
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    stream=sys.stdout,
-    encoding='utf-8',
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 bot = Bot(token=config.TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
