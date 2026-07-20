@@ -1,5 +1,6 @@
 import json
 import base64
+import traceback
 import anthropic
 import config
 
@@ -22,6 +23,13 @@ Return ONLY a JSON array of 10 objects, no explanations or markdown:
 
 
 async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[dict]:
+    try:
+        return await _generate_prompts_inner(user_request, image_bytes)
+    except Exception:
+        raise ValueError(traceback.format_exc())
+
+
+async def _generate_prompts_inner(user_request: str, image_bytes: bytes | None = None) -> list[dict]:
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
 
     content: list = []
