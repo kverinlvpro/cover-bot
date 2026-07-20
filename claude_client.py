@@ -48,23 +48,57 @@ def _build_system_prompt(paint_type: str) -> str:
     return _SYSTEM_PROMPT_BASE.format(color_rule=rule)
 
 
-CARD_ANALYSIS_SYSTEM = (
-    "Ты аналитик товарных карточек маркетплейсов. "
-    "Используй web_fetch чтобы загрузить страницу товара. "
-    "После загрузки верни ТОЛЬКО JSON без markdown и пояснений:\n"
-    '{"name": "название товара из h1", '
-    '"volume": "объём, вес или расход (например: 2.5л, 5кг, 9м²/л) — ищи в названии, характеристиках и описании; null если нигде нет", '
-    '"paint_type": "furniture" или "walls", '
+_CARD_ANALYSIS_PROMPT = (
+    "Проанализируй содержимое страницы товара с маркетплейса и верни ТОЛЬКО JSON без markdown:\n"
+    '{"name": "название товара", '
+    '"volume": "объём/вес/расход (2.5л, 5кг, 9м²/л) или null", '
+    '"paint_type": "furniture или walls", '
     '"utps": ["УТП 1", "УТП 2", "УТП 3", "УТП 4", "УТП 5", "УТП 6"]}\n'
-    "paint_type: walls — если краска для стен/потолка/фасада/интерьера; furniture — для мебели/дерева/металла.\n"
-    "volume: ищи в характеристиках (Объём, Вес, Расход), в скобках в названии, в описании — не ограничивайся только h1.\n"
-    "utps — 6-10 коротких уникальных торговых преимуществ (3-5 слов каждое) из описания товара."
+    "paint_type: walls — краска для стен/потолка/фасада/интерьера; furniture — для мебели/дерева/металла.\n"
+    "volume: ищи в характеристиках (Объём, Вес, Расход), в скобках в названии, в описании.\n"
+    "utps — 6-10 коротких торговых преимуществ (3-5 слов каждое)."
 )
 
-_FETCH_AGENTS = [
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+_BROWSER_CONFIGS = [
+    {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Upgrade-Insecure-Requests": "1",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Sec-CH-UA": '"Google Chrome";v="125", "Chromium";v="125", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?1",
+        "Sec-CH-UA-Platform": '"Android"',
+        "Upgrade-Insecure-Requests": "1",
+        "Cache-Control": "max-age=0",
+    },
+    {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-User": "?1",
+        "Sec-CH-UA": '"Google Chrome";v="125", "Chromium";v="125", "Not-A.Brand";v="99"',
+        "Sec-CH-UA-Mobile": "?0",
+        "Sec-CH-UA-Platform": '"Windows"',
+        "Upgrade-Insecure-Requests": "1",
+    },
 ]
 
 
@@ -83,17 +117,21 @@ def _extract_page_content(html: str) -> str:
 
 
 async def _fetch_page(url: str) -> str:
-    for ua in _FETCH_AGENTS:
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    base_url = f"{parsed.scheme}://{parsed.netloc}/"
+
+    for cfg in _BROWSER_CONFIGS:
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=20) as http:
-                r = await http.get(url, headers={
-                    "User-Agent": ua,
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-                    "Accept-Encoding": "gzip, deflate, br",
-                })
-                logger.info("_fetch_page status=%d url=%s", r.status_code, url[:80])
-                if r.status_code == 200:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=25) as http:
+                # Warm up with homepage to get cookies + look like a real browser session
+                try:
+                    await http.get(base_url, headers=cfg, timeout=10)
+                except Exception:
+                    pass
+                r = await http.get(url, headers={**cfg, "Referer": base_url})
+                logger.info("_fetch_page status=%d ua=%s", r.status_code, cfg["User-Agent"][:40])
+                if r.status_code == 200 and len(r.text) > 500:
                     return _extract_page_content(r.text)
         except Exception as e:
             logger.warning("_fetch_page exception: %s", e)
@@ -101,75 +139,44 @@ async def _fetch_page(url: str) -> str:
 
 
 async def analyze_card(url: str) -> dict:
-    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
-    tools = [{"type": "web_fetch_20260209", "name": "web_fetch"}]
-    messages: list = [{"role": "user", "content": f"Проанализируй карточку товара: {url}"}]
-    last_text = ""
+    page_content = await _fetch_page(url)
 
-    for turn in range(5):
-        try:
-            response = await client.messages.create(
-                model="claude-sonnet-5",
-                max_tokens=2048,
-                tools=tools,
-                system=CARD_ANALYSIS_SYSTEM,
-                messages=messages,
-            )
-        except Exception as e:
-            logger.error("analyze_card API error turn=%d: %s", turn, e)
-            raise ValueError(f"Ошибка API (шаг {turn}): {e}")
-
-        logger.info(
-            "analyze_card turn=%d stop=%s blocks=%s",
-            turn, response.stop_reason,
-            [type(b).__name__ for b in response.content],
+    if not page_content:
+        raise ValueError(
+            "Страница недоступна — маркетплейс заблокировал запрос.\n"
+            "Попробуйте другую ссылку или используйте режим «Гибкая настройка»."
         )
 
-        text = next((b.text for b in response.content if hasattr(b, "text")), "")
-        if text:
-            last_text = text
-            logger.info("analyze_card text=%s", text[:400])
+    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
+    prompt = f"URL: {url}\n\nСОДЕРЖИМОЕ СТРАНИЦЫ:\n{page_content}\n\n{_CARD_ANALYSIS_PROMPT}"
 
-        if text and "{" in text:
-            clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
-            s = clean.find("{")
-            e = clean.rfind("}") + 1
-            if s >= 0 and e > s:
-                try:
-                    result = json.loads(clean[s:e])
-                    if "name" in result and "utps" in result:
-                        # Default paint_type to furniture if not detected
-                        if "paint_type" not in result:
-                            result["paint_type"] = "furniture"
-                        return result
-                except json.JSONDecodeError:
-                    pass
+    try:
+        response = await client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=2048,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        raise ValueError(f"Ошибка Claude API: {e}")
 
-        if response.stop_reason == "tool_use":
-            messages.append({"role": "assistant", "content": response.content})
-            tool_results = []
-            for block in response.content:
-                if getattr(block, "type", None) == "tool_use" and getattr(block, "name", None) == "web_fetch":
-                    fetch_url = block.input.get("url", url)
-                    logger.info("analyze_card tool web_fetch url=%s", fetch_url)
-                    page = await _fetch_page(fetch_url)
-                    if not page:
-                        page = "Страница недоступна (HTTP 403). Данных нет."
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": page,
-                    })
-            if tool_results:
-                messages.append({"role": "user", "content": tool_results})
-            continue
+    text = next((b.text for b in response.content if hasattr(b, "text")), "")
+    logger.info("analyze_card response: %s", text[:400])
 
-        break
+    if "{" in text:
+        clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
+        s = clean.find("{")
+        e = clean.rfind("}") + 1
+        if s >= 0 and e > s:
+            try:
+                result = json.loads(clean[s:e])
+                if "name" in result and "utps" in result:
+                    if "paint_type" not in result:
+                        result["paint_type"] = "furniture"
+                    return result
+            except json.JSONDecodeError:
+                pass
 
-    raise ValueError(
-        f"Не удалось извлечь данные карточки.\n"
-        f"Последний ответ Claude: {last_text[:300] or '(пусто)'}"
-    )
+    raise ValueError(f"Не удалось извлечь JSON из ответа Claude:\n{text[:300]}")
 
 
 async def analyze_color_samples(color_image_bytes: list[bytes]) -> str:
