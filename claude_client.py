@@ -1,7 +1,6 @@
 import re
 import json
 import base64
-import httpx
 import anthropic
 import config
 
@@ -24,71 +23,51 @@ SYSTEM_PROMPT = """Ты — профессиональный дизайнер о
 ["промт 1", "промт 2", ..., "промт 10"]"""
 
 
-def _extract_page_content(html: str) -> str:
-    # Extract JSON-LD structured data (has clean product info)
-    jsonld = re.findall(
-        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>',
-        html, re.IGNORECASE
-    )
-    jsonld_text = "\n".join(jsonld[:3])[:4000]
-
-    # Strip HTML to plain text
-    text = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
-    text = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-
-    result = ""
-    if jsonld_text:
-        result = f"STRUCTURED DATA:\n{jsonld_text}\n\nPAGE TEXT:\n"
-    return result + text[:25000]
+CARD_ANALYSIS_SYSTEM = (
+    "Ты аналитик товарных карточек маркетплейсов. "
+    "Используй web_fetch чтобы загрузить страницу товара. "
+    "После загрузки верни ТОЛЬКО JSON без markdown и пояснений:\n"
+    '{"name": "название товара из h1", '
+    '"volume": "объём/вес если указан в названии (например: 360г, 1л), иначе null", '
+    '"utps": ["УТП 1", "УТП 2", "УТП 3", "УТП 4", "УТП 5", "УТП 6"]}\n'
+    "utps — 6-10 коротких уникальных торговых преимуществ (3-5 слов каждое) "
+    "из описания и характеристик товара."
+)
 
 
 async def analyze_card(url: str) -> dict:
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    async with httpx.AsyncClient(follow_redirects=True, timeout=30) as http:
-        r = await http.get(url, headers=headers)
-        if r.status_code != 200:
-            raise ValueError(f"HTTP {r.status_code}")
-        content = _extract_page_content(r.text)
-
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
-    prompt = (
-        f"Проанализируй контент страницы товара с маркетплейса и извлеки информацию.\n\n"
-        f"КОНТЕНТ СТРАНИЦЫ:\n{content}\n\n"
-        f"Верни ТОЛЬКО JSON без пояснений и markdown:\n"
-        f'{{"name": "полное название товара из h1", '
-        f'"volume": "объём/вес если указан в названии (например: 360г, 1л), иначе null", '
-        f'"utps": ["УТП 1", "УТП 2", "УТП 3", "УТП 4", "УТП 5", "УТП 6"]}}\n\n'
-        f"Для utps — 6-10 коротких уникальных торговых преимуществ (3-5 слов каждое) "
-        f"на основе описания и характеристик товара."
-    )
+    tools = [{"type": "web_fetch_20260209", "name": "web_fetch"}]
+    messages = [{"role": "user", "content": f"Проанализируй карточку товара: {url}"}]
 
-    response = await client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=1024,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    # Server-side tool loop: Anthropic executes web_fetch on their infrastructure
+    for _ in range(5):
+        response = await client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=2048,
+            tools=tools,
+            system=CARD_ANALYSIS_SYSTEM,
+            messages=messages,
+        )
 
-    raw = next(block.text for block in response.content if hasattr(block, "text")).strip()
-    clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', raw)
-    start = clean.find("{")
-    end = clean.rfind("}") + 1
-    if start == -1 or end == 0:
-        raise ValueError(f"Claude не вернул JSON: {raw[:200]}")
+        text = next((b.text for b in response.content if hasattr(b, "text")), "")
 
-    result = json.loads(clean[start:end])
-    if "name" not in result or "utps" not in result:
-        raise ValueError(f"Неверный формат ответа Claude")
-    return result
+        if text and "{" in text:
+            clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
+            start = clean.find("{")
+            end = clean.rfind("}") + 1
+            if start >= 0 and end > start:
+                result = json.loads(clean[start:end])
+                if "name" in result and "utps" in result:
+                    return result
+
+        if response.stop_reason == "tool_use":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
+
+        break
+
+    raise ValueError("Claude не смог проанализировать карточку")
 
 
 async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[str]:
