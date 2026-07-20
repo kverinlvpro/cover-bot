@@ -1,4 +1,3 @@
-import sys
 import asyncio
 import logging
 import uuid
@@ -24,18 +23,29 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 bot = Bot(token=config.TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
-# Хранилище: image_id -> {"prompt": str, "url": str}
 _image_store: dict[str, dict] = {}
 
 
 class CoverForm(StatesGroup):
+    # Shared first steps
+    ref_photo = State()
+    mode_select = State()
+
+    # === Existing card flow ===
+    card_url = State()
+    confirm_volume = State()
+    edit_volume = State()
+    utp_select = State()
+    card_headline = State()
+    card_subtitle = State()
+
+    # === Flexible flow ===
     product_name = State()
     volume = State()
     headline = State()
     subtitle = State()
     badges = State()
     design_request = State()
-    photos = State()
 
 
 class FixForm(StatesGroup):
@@ -50,7 +60,19 @@ class FixCallback(CallbackData, prefix="fix"):
     image_id: str
 
 
-# --- Клавиатуры ---
+class VolConfirmCallback(CallbackData, prefix="vc"):
+    ok: bool
+
+
+class UtpToggleCallback(CallbackData, prefix="utptog"):
+    idx: int
+
+
+class UtpDoneCallback(CallbackData, prefix="utpdone"):
+    pass
+
+
+# --- Keyboards ---
 
 def _kb(*labels: str) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -61,9 +83,15 @@ def _kb(*labels: str) -> ReplyKeyboardMarkup:
 
 
 SKIP_KB = _kb("Пропустить")
-DONE_SKIP_KB = _kb("Готово", "Пропустить")
 START_KB = _kb("🚀 Запустить бот")
 AGAIN_KB = _kb("🔄 Сгенерировать ещё")
+MODE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔗 На существующую карточку")],
+        [KeyboardButton(text="⚙️ Гибкая настройка")],
+    ],
+    resize_keyboard=True,
+)
 
 
 def _image_kb(image_id: str) -> InlineKeyboardMarkup:
@@ -79,16 +107,32 @@ def _image_kb(image_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-# --- /start и /cancel ---
+def _build_utp_kb(utps: list[str], selected: set) -> InlineKeyboardMarkup:
+    rows = []
+    for i, utp in enumerate(utps):
+        prefix = "✅" if i in selected else "◻️"
+        rows.append([InlineKeyboardButton(
+            text=f"{prefix} {utp}",
+            callback_data=UtpToggleCallback(idx=i).pack(),
+        )])
+    rows.append([InlineKeyboardButton(
+        text="✅ Подтвердить выбор",
+        callback_data=UtpDoneCallback().pack(),
+    )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- /start and /cancel ---
 
 async def _start_form(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "Введите <b>название товара</b>:",
+        "Отправьте <b>референсное фото товара</b> (упаковка/банка).\n"
+        "Этот шаг обязателен — пропустить нельзя.",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
     )
-    await state.set_state(CoverForm.product_name)
+    await state.set_state(CoverForm.ref_photo)
 
 
 @dp.message(CommandStart())
@@ -110,13 +154,173 @@ async def btn_start_or_again(message: Message, state: FSMContext):
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
+    await message.answer("Отменено.", reply_markup=START_KB)
+
+
+# --- Step 1: Reference photo (mandatory) ---
+
+@dp.message(CoverForm.ref_photo, F.photo)
+async def step_ref_photo(message: Message, state: FSMContext):
+    await state.update_data(photo_ids=[message.photo[-1].file_id])
+    await message.answer("Фото получено! Выберите режим:", reply_markup=MODE_KB)
+    await state.set_state(CoverForm.mode_select)
+
+
+@dp.message(CoverForm.ref_photo)
+async def step_ref_photo_bad(message: Message):
+    await message.answer("Отправьте фото товара (упаковка/банка). Текст не принимается.")
+
+
+# --- Step 2: Mode selection ---
+
+@dp.message(CoverForm.mode_select, F.text == "🔗 На существующую карточку")
+async def mode_existing_card(message: Message, state: FSMContext):
     await message.answer(
-        "Отменено. Нажмите /start чтобы начать заново.",
+        "Отправьте ссылку на товар (Ozon или Wildberries):",
         reply_markup=ReplyKeyboardRemove(),
     )
+    await state.set_state(CoverForm.card_url)
 
 
-# --- Шаги формы ---
+@dp.message(CoverForm.mode_select, F.text == "⚙️ Гибкая настройка")
+async def mode_flexible(message: Message, state: FSMContext):
+    await message.answer(
+        "Введите <b>название товара</b>:",
+        parse_mode="HTML",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.set_state(CoverForm.product_name)
+
+
+# === EXISTING CARD FLOW ===
+
+@dp.message(CoverForm.card_url, F.text)
+async def step_card_url(message: Message, state: FSMContext):
+    url = message.text.strip()
+    status = await message.answer("⏳ Анализирую карточку товара…")
+
+    try:
+        analysis = await claude_client.analyze_card(url)
+    except Exception as e:
+        await status.edit_text(
+            f"❌ Не удалось проанализировать карточку:\n{e}\n\nПопробуйте ещё раз."
+        )
+        return
+
+    name = analysis.get("name", "Неизвестно")
+    volume = analysis.get("volume")
+    utps = analysis.get("utps", [])
+
+    await state.update_data(product_name=name, utp_list=utps, utp_selected=[])
+
+    await status.edit_text(
+        f"✅ Карточка проанализирована\n\n<b>Название:</b> {name}",
+        parse_mode="HTML",
+    )
+
+    if volume:
+        await state.update_data(volume_detected=volume)
+        await message.answer(
+            f"Объём: <b>{volume}</b> — верно?",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="✅ Верно", callback_data=VolConfirmCallback(ok=True).pack())],
+                [InlineKeyboardButton(text="✏️ Исправить", callback_data=VolConfirmCallback(ok=False).pack())],
+            ]),
+        )
+        await state.set_state(CoverForm.confirm_volume)
+    else:
+        await message.answer("Объём не найден в заголовке. Введите вручную (например: 360г, 1л):")
+        await state.set_state(CoverForm.edit_volume)
+
+
+@dp.callback_query(VolConfirmCallback.filter(), CoverForm.confirm_volume)
+async def confirm_volume_cb(query: CallbackQuery, callback_data: VolConfirmCallback, state: FSMContext):
+    await query.answer()
+    await query.message.edit_reply_markup(reply_markup=None)
+    if callback_data.ok:
+        data = await state.get_data()
+        await state.update_data(volume=data["volume_detected"])
+        await _show_utp_selection(query.message, state)
+    else:
+        await query.message.answer("Введите правильный объём (например: 360г, 1л):")
+        await state.set_state(CoverForm.edit_volume)
+
+
+@dp.message(CoverForm.edit_volume, F.text)
+async def step_edit_volume(message: Message, state: FSMContext):
+    await state.update_data(volume=message.text.strip())
+    await _show_utp_selection(message, state)
+
+
+async def _show_utp_selection(target: Message, state: FSMContext):
+    data = await state.get_data()
+    utps = data.get("utp_list", [])
+    await target.answer(
+        "Выберите УТП (преимущества) для обложки.\n"
+        "Отметьте нужные и нажмите «Подтвердить»:",
+        reply_markup=_build_utp_kb(utps, set()),
+    )
+    await state.set_state(CoverForm.utp_select)
+
+
+@dp.callback_query(UtpToggleCallback.filter(), CoverForm.utp_select)
+async def utp_toggle(query: CallbackQuery, callback_data: UtpToggleCallback, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("utp_selected", []))
+    idx = callback_data.idx
+    if idx in selected:
+        selected.discard(idx)
+    else:
+        selected.add(idx)
+    await state.update_data(utp_selected=list(selected))
+    utps = data.get("utp_list", [])
+    try:
+        await query.message.edit_reply_markup(reply_markup=_build_utp_kb(utps, selected))
+    except Exception:
+        pass
+    await query.answer()
+
+
+@dp.callback_query(UtpDoneCallback.filter(), CoverForm.utp_select)
+async def utp_done(query: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("utp_selected", []))
+    if not selected:
+        await query.answer("Выберите хотя бы одно УТП!", show_alert=True)
+        return
+    utps = data.get("utp_list", [])
+    badges = ", ".join(utps[i] for i in sorted(selected))
+    await state.update_data(badges=badges)
+    await query.answer()
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await query.message.answer(
+        "Введите <b>заголовок</b> — главный текст на обложке:",
+        parse_mode="HTML",
+    )
+    await state.set_state(CoverForm.card_headline)
+
+
+@dp.message(CoverForm.card_headline, F.text)
+async def step_card_headline(message: Message, state: FSMContext):
+    await state.update_data(headline=message.text.strip())
+    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML")
+    await state.set_state(CoverForm.card_subtitle)
+
+
+@dp.message(CoverForm.card_subtitle, F.text)
+async def step_card_subtitle(message: Message, state: FSMContext):
+    await state.update_data(subtitle=message.text.strip(), design_request=None)
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Принято! Запускаю генерацию…", reply_markup=ReplyKeyboardRemove())
+    await run_pipeline(message, data)
+
+
+# === FLEXIBLE FLOW ===
 
 @dp.message(CoverForm.product_name, F.text)
 async def step_product_name(message: Message, state: FSMContext):
@@ -141,10 +345,7 @@ async def step_volume(message: Message, state: FSMContext):
 @dp.message(CoverForm.headline, F.text)
 async def step_headline(message: Message, state: FSMContext):
     await state.update_data(headline=message.text.strip())
-    await message.answer(
-        "Введите <b>подзаголовок</b>:",
-        parse_mode="HTML",
-    )
+    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML")
     await state.set_state(CoverForm.subtitle)
 
 
@@ -175,77 +376,14 @@ async def step_badges(message: Message, state: FSMContext):
 @dp.message(CoverForm.design_request, F.text)
 async def step_design_request(message: Message, state: FSMContext):
     text = message.text.strip()
-    await state.update_data(
-        design_request=None if text == "Пропустить" else text,
-        photo_ids=[],
-    )
-    await message.answer(
-        "Прикрепите <b>фото-референсы товара</b> (до 4 штук).\n"
-        "Можно отправить альбом сразу или по одному фото.\n"
-        "Когда все загружены — нажмите «Готово».\n"
-        "Если референсы не нужны — «Пропустить».",
-        parse_mode="HTML",
-        reply_markup=DONE_SKIP_KB,
-    )
-    await state.set_state(CoverForm.photos)
-
-
-# --- Приём фото на шаге photos ---
-
-_media_groups: dict[str, list[Message]] = {}
-_media_group_tasks: dict[str, asyncio.Task] = {}
-
-
-async def _flush_media_group(group_id: str, state: FSMContext, reply_to: Message):
-    await asyncio.sleep(0.6)
-    msgs = _media_groups.pop(group_id, [])
-    _media_group_tasks.pop(group_id, None)
-    if not msgs:
-        return
-    msgs.sort(key=lambda m: m.message_id)
-    data = await state.get_data()
-    existing: list = data.get("photo_ids", [])
-    new_ids = [m.photo[-1].file_id for m in msgs if m.photo]
-    combined = (existing + new_ids)[:4]
-    await state.update_data(photo_ids=combined)
-    await reply_to.answer(
-        f"Получено {len(combined)} фото. Отправьте ещё или нажмите «Готово».",
-        reply_markup=DONE_SKIP_KB,
-    )
-
-
-@dp.message(CoverForm.photos, F.media_group_id & F.photo)
-async def photos_media_group(message: Message, state: FSMContext):
-    gid = message.media_group_id
-    _media_groups.setdefault(gid, []).append(message)
-    if gid in _media_group_tasks:
-        _media_group_tasks[gid].cancel()
-    _media_group_tasks[gid] = asyncio.create_task(
-        _flush_media_group(gid, state, message)
-    )
-
-
-@dp.message(CoverForm.photos, F.photo & ~F.media_group_id)
-async def photos_single(message: Message, state: FSMContext):
-    data = await state.get_data()
-    existing: list = data.get("photo_ids", [])
-    combined = (existing + [message.photo[-1].file_id])[:4]
-    await state.update_data(photo_ids=combined)
-    await message.answer(
-        f"Фото {len(combined)}/4. Отправьте ещё или нажмите «Готово».",
-        reply_markup=DONE_SKIP_KB,
-    )
-
-
-@dp.message(CoverForm.photos, F.text.in_({"Готово", "Пропустить"}))
-async def photos_done(message: Message, state: FSMContext):
+    await state.update_data(design_request=None if text == "Пропустить" else text)
     data = await state.get_data()
     await state.clear()
     await message.answer("Принято! Запускаю генерацию…", reply_markup=ReplyKeyboardRemove())
     await run_pipeline(message, data)
 
 
-# --- Утилиты ---
+# --- Utilities ---
 
 def _build_request(data: dict) -> str:
     product = data["product_name"]
@@ -303,7 +441,7 @@ async def _send_image(target: Message, url: str, prompt: str, label: str):
         await target.answer(f"{label}: фото готово, но не удалось отправить.")
 
 
-# --- Основной пайплайн ---
+# --- Main pipeline ---
 
 async def run_pipeline(message: Message, data: dict):
     user_request = _build_request(data)
@@ -358,13 +496,10 @@ async def run_pipeline(message: Message, data: dict):
         await status.edit_text(f"Готово! Сгенерировано {done['ok']}/10 обложек.")
     except Exception:
         pass
-    await message.answer(
-        "Хотите сделать ещё одну серию?",
-        reply_markup=AGAIN_KB,
-    )
+    await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
 
 
-# --- Кнопка «Размножить идею» ---
+# --- Multiply idea ---
 
 @dp.callback_query(MultiplyCallback.filter())
 async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
@@ -399,7 +534,7 @@ async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
         pass
 
 
-# --- Кнопка «Исправить фотографию» ---
+# --- Fix photo ---
 
 @dp.callback_query(FixCallback.filter())
 async def fix_photo_start(query: CallbackQuery, callback_data: FixCallback, state: FSMContext):
@@ -415,7 +550,7 @@ async def fix_photo_start(query: CallbackQuery, callback_data: FixCallback, stat
     await query.message.answer(
         "Опишите что нужно исправить или добавить.\n"
         "Можно также прикрепить фото-референс с подписью.\n\n"
-        "<i>Пример: исправь банку на ту, что на референсе / добавь малярную кисть / измени фон на белый</i>\n\n"
+        "<i>Пример: исправь банку / добавь малярную кисть / измени фон на белый</i>\n\n"
         "Для отмены — /cancel",
         parse_mode="HTML",
         reply_markup=ReplyKeyboardRemove(),
@@ -427,12 +562,10 @@ async def fix_with_text(message: Message, state: FSMContext):
     fsm_data = await state.get_data()
     fix_image_id = fsm_data.get("fix_image_id")
     await state.clear()
-
     image_data = _image_store.get(fix_image_id)
     if not image_data:
         await message.answer("Данные не найдены. Попробуйте нажать кнопку ещё раз.")
         return
-
     await run_fix_pipeline(message, image_data, message.text.strip(), extra_ref_url=None)
 
 
@@ -441,15 +574,12 @@ async def fix_with_photo(message: Message, state: FSMContext):
     fsm_data = await state.get_data()
     fix_image_id = fsm_data.get("fix_image_id")
     await state.clear()
-
     image_data = _image_store.get(fix_image_id)
     if not image_data:
         await message.answer("Данные не найдены. Попробуйте нажать кнопку ещё раз.")
         return
-
     correction = message.caption or "Исправь согласно приложенному референсу"
     extra_ref_url = await _tg_url(message.photo[-1].file_id)
-
     await run_fix_pipeline(message, image_data, correction, extra_ref_url)
 
 
@@ -460,21 +590,18 @@ async def run_fix_pipeline(
     extra_ref_url: str | None,
 ):
     original_url = image_data["url"]
-
     fix_prompt = (
         f"Возьми изображение как основу и внеси следующие исправления: {correction}. "
         f"Сохрани общую композицию, стиль и расположение остальных элементов без изменений. "
         f"Вертикальный формат 3:4, современный UX/UI дизайн, "
         f"высококачественная коммерческая обложка для маркетплейса."
     )
-
     image_urls = [original_url]
     if extra_ref_url:
         image_urls.append(extra_ref_url)
 
     status = await message.answer("Исправляю изображение…")
     url = await piapi_client.generate_image(fix_prompt, image_urls)
-
     if url:
         await _send_image(message, url, fix_prompt, "Исправленный вариант")
         try:
