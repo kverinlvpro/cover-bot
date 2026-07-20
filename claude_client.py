@@ -1,3 +1,4 @@
+import re
 import json
 import base64
 import anthropic
@@ -58,7 +59,8 @@ async def generate_prompts(user_request: str, image_bytes: bytes | None = None) 
     if start == -1 or end == 0:
         raise ValueError(f"Claude не вернул JSON-массив: {raw[:300]}")
 
-    prompts = json.loads(raw[start:end])
+    json_str = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', raw[start:end])
+    prompts = json.loads(json_str)
     if not isinstance(prompts, list) or len(prompts) != 10:
         raise ValueError(f"Ожидалось 10 промтов, получено {len(prompts)}")
 
