@@ -655,6 +655,15 @@ async def run_pipeline(message: Message, data: dict):
             except Exception:
                 pass
 
+    if paint_type == "walls" and color_image_bytes:
+        try:
+            await status.edit_text("Анализирую оттенок краски…")
+            color_description = await claude_client.analyze_color_samples(color_image_bytes)
+            logging.info("color_description: %s", color_description)
+            user_request += f"\n\nТочный оттенок краски (определён по образцам): {color_description}"
+        except Exception as e:
+            logging.warning("analyze_color_samples failed: %s", e)
+
     try:
         prompts = await claude_client.generate_prompts(
             user_request,

@@ -53,10 +53,11 @@ CARD_ANALYSIS_SYSTEM = (
     "Используй web_fetch чтобы загрузить страницу товара. "
     "После загрузки верни ТОЛЬКО JSON без markdown и пояснений:\n"
     '{"name": "название товара из h1", '
-    '"volume": "объём/вес если указан в названии (например: 360г, 1л), иначе null", '
+    '"volume": "объём, вес или расход (например: 2.5л, 5кг, 9м²/л) — ищи в названии, характеристиках и описании; null если нигде нет", '
     '"paint_type": "furniture" или "walls", '
     '"utps": ["УТП 1", "УТП 2", "УТП 3", "УТП 4", "УТП 5", "УТП 6"]}\n'
-    "paint_type: walls — если краска для стен/потолка/фасада; furniture — для мебели/дерева/металла.\n"
+    "paint_type: walls — если краска для стен/потолка/фасада/интерьера; furniture — для мебели/дерева/металла.\n"
+    "volume: ищи в характеристиках (Объём, Вес, Расход), в скобках в названии, в описании — не ограничивайся только h1.\n"
     "utps — 6-10 коротких уникальных торговых преимуществ (3-5 слов каждое) из описания товара."
 )
 
@@ -169,6 +170,35 @@ async def analyze_card(url: str) -> dict:
         f"Не удалось извлечь данные карточки.\n"
         f"Последний ответ Claude: {last_text[:300] or '(пусто)'}"
     )
+
+
+async def analyze_color_samples(color_image_bytes: list[bytes]) -> str:
+    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
+    content: list = []
+    for cb in color_image_bytes[:4]:
+        b64 = base64.standard_b64encode(cb).decode()
+        content.append({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
+        })
+    content.append({
+        "type": "text",
+        "text": (
+            "Внимательно изучи образцы цвета и живые фото. "
+            "Дай точное описание цвета краски для использования в промте нейросети — "
+            "ответь ОДНИМ предложением на русском. "
+            "Укажи: точный оттенок, тон (тёплый/холодный/нейтральный), насыщенность, "
+            "ближайший аналог из понятных цветов. "
+            "Пример ответа: «Тёплый светло-бежевый оттенок с нотками слоновой кости, "
+            "почти белый, очень светлый, матовый, warm white.»"
+        ),
+    })
+    response = await client.messages.create(
+        model="claude-sonnet-5",
+        max_tokens=200,
+        messages=[{"role": "user", "content": content}],
+    )
+    return next(b.text for b in response.content if hasattr(b, "text")).strip()
 
 
 async def generate_prompts(
