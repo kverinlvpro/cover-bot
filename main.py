@@ -478,25 +478,41 @@ async def run_pipeline(message: Message, data: dict):
     done = {"n": 0, "ok": 0}
 
     async def gen_and_send(idx: int, prompt: str):
-        url = await piapi_client.generate_image(prompt, ref_urls or None)
+        try:
+            url = await piapi_client.generate_image(prompt, ref_urls or None)
+        except Exception as e:
+            logging.error("generate_image idx=%d error: %s", idx, e)
+            url = None
         done["n"] += 1
         if url:
             done["ok"] += 1
-            await _send_image(message, url, prompt, f"Вариант {idx}/10")
+            try:
+                await _send_image(message, url, prompt, f"Вариант {idx}/10")
+            except Exception as e:
+                logging.error("_send_image idx=%d error: %s", idx, e)
         else:
-            await message.answer(f"Вариант {idx}: генерация не удалась.")
+            try:
+                await message.answer(f"Вариант {idx}: генерация не удалась.")
+            except Exception:
+                pass
         try:
             await status.edit_text(f"Обработано {done['n']}/10 | Готово: {done['ok']}")
         except Exception:
             pass
 
-    await asyncio.gather(*[gen_and_send(i + 1, p) for i, p in enumerate(prompts)])
+    try:
+        await asyncio.gather(*[gen_and_send(i + 1, p) for i, p in enumerate(prompts)])
+    except Exception as e:
+        logging.error("gather error: %s", e)
 
     try:
         await status.edit_text(f"Готово! Сгенерировано {done['ok']}/10 обложек.")
     except Exception:
         pass
-    await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
+    try:
+        await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
+    except Exception as e:
+        logging.error("AGAIN_KB send error: %s", e)
 
 
 # --- Multiply idea ---
