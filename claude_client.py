@@ -30,6 +30,7 @@ async def generate_prompts(user_request: str, image_bytes: bytes | None = None) 
 
 
 async def _generate_prompts_inner(user_request: str, image_bytes: bytes | None = None) -> list[dict]:
+    import platform
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
 
     content: list = []
@@ -51,12 +52,19 @@ async def _generate_prompts_inner(user_request: str, image_bytes: bytes | None =
     else:
         content.append({"type": "text", "text": user_request})
 
-    response = await client.messages.create(
-        model="claude-sonnet-5",
-        max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": content}]
-    )
+    try:
+        response = await client.messages.create(
+            model="claude-sonnet-5",
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": content}]
+        )
+    except UnicodeEncodeError as e:
+        raise ValueError(
+            f"Header encoding error at pos {e.start}-{e.end}\n"
+            f"Bad value: {repr(e.object)}\n"
+            f"Platform: sys={platform.system()} machine={platform.machine()} ver={platform.version()[:80]}"
+        )
 
     raw = next(block.text for block in response.content if hasattr(block, "text")).strip()
 
