@@ -23,6 +23,22 @@ SYSTEM_PROMPT = """Ты — профессиональный дизайнер о
 
 
 async def generate_prompts(user_request: str, image_bytes: bytes | None = None) -> list[str]:
+    key = config.CLAUDE_API_KEY
+    key_repr = repr(key[:30]) + f"... len={len(key)} ascii={key.isascii()}"
+
+    try:
+        return await _do_generate(user_request, image_bytes)
+    except UnicodeEncodeError as e:
+        raise ValueError(
+            f"Header encoding error pos {e.start}-{e.end}\n"
+            f"Bad header value: {repr(e.object)}\n"
+            f"API key check: {key_repr}"
+        )
+    except Exception as e:
+        raise ValueError(f"API key check: {key_repr}\nError: {e}")
+
+
+async def _do_generate(user_request: str, image_bytes: bytes | None = None) -> list[str]:
     client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
 
     content: list = []
