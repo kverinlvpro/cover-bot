@@ -82,13 +82,16 @@ def _kb(*labels: str) -> ReplyKeyboardMarkup:
     )
 
 
-SKIP_KB = _kb("Пропустить")
+RESTART_BTN = "🔄 Заново"
+SKIP_KB = _kb("Пропустить", RESTART_BTN)
 START_KB = _kb("🚀 Запустить бот")
 AGAIN_KB = _kb("🔄 Сгенерировать ещё")
+RESTART_KB = _kb(RESTART_BTN)
 MODE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔗 На существующую карточку")],
         [KeyboardButton(text="⚙️ Гибкая настройка")],
+        [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
 )
@@ -146,7 +149,7 @@ async def cmd_start(message: Message, state: FSMContext):
     )
 
 
-@dp.message(F.text.in_({"🚀 Запустить бот", "🔄 Сгенерировать ещё"}))
+@dp.message(F.text.in_({"🚀 Запустить бот", "🔄 Сгенерировать ещё", RESTART_BTN}))
 async def btn_start_or_again(message: Message, state: FSMContext):
     await _start_form(message, state)
 
@@ -168,7 +171,10 @@ async def step_ref_photo(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.ref_photo)
 async def step_ref_photo_bad(message: Message):
-    await message.answer("Отправьте фото товара (упаковка/банка). Текст не принимается.")
+    await message.answer(
+        "Отправьте фото товара (упаковка/банка). Текст не принимается.",
+        reply_markup=RESTART_KB,
+    )
 
 
 # --- Step 2: Mode selection ---
@@ -177,7 +183,7 @@ async def step_ref_photo_bad(message: Message):
 async def mode_existing_card(message: Message, state: FSMContext):
     await message.answer(
         "Отправьте ссылку на товар (Ozon или Wildberries):",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.card_url)
 
@@ -187,7 +193,7 @@ async def mode_flexible(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>название товара</b>:",
         parse_mode="HTML",
-        reply_markup=ReplyKeyboardRemove(),
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.product_name)
 
@@ -230,7 +236,10 @@ async def step_card_url(message: Message, state: FSMContext):
         )
         await state.set_state(CoverForm.confirm_volume)
     else:
-        await message.answer("Объём не найден в заголовке. Введите вручную (например: 360г, 1л):")
+        await message.answer(
+            "Объём не найден в заголовке. Введите вручную (например: 360г, 1л):",
+            reply_markup=RESTART_KB,
+        )
         await state.set_state(CoverForm.edit_volume)
 
 
@@ -243,7 +252,10 @@ async def confirm_volume_cb(query: CallbackQuery, callback_data: VolConfirmCallb
         await state.update_data(volume=data["volume_detected"])
         await _show_utp_selection(query.message, state)
     else:
-        await query.message.answer("Введите правильный объём (например: 360г, 1л):")
+        await query.message.answer(
+            "Введите правильный объём (например: 360г, 1л):",
+            reply_markup=RESTART_KB,
+        )
         await state.set_state(CoverForm.edit_volume)
 
 
@@ -300,6 +312,7 @@ async def utp_done(query: CallbackQuery, state: FSMContext):
     await query.message.answer(
         "Введите <b>заголовок</b> — главный текст на обложке:",
         parse_mode="HTML",
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.card_headline)
 
@@ -307,7 +320,7 @@ async def utp_done(query: CallbackQuery, state: FSMContext):
 @dp.message(CoverForm.card_headline, F.text)
 async def step_card_headline(message: Message, state: FSMContext):
     await state.update_data(headline=message.text.strip())
-    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML")
+    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=RESTART_KB)
     await state.set_state(CoverForm.card_subtitle)
 
 
@@ -328,6 +341,7 @@ async def step_product_name(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>объём товара</b> (например: 360г, 1л, 500мл):",
         parse_mode="HTML",
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.volume)
 
@@ -338,6 +352,7 @@ async def step_volume(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>заголовок</b> — главный текст на обложке:",
         parse_mode="HTML",
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.headline)
 
@@ -345,7 +360,11 @@ async def step_volume(message: Message, state: FSMContext):
 @dp.message(CoverForm.headline, F.text)
 async def step_headline(message: Message, state: FSMContext):
     await state.update_data(headline=message.text.strip())
-    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML")
+    await message.answer(
+        "Введите <b>подзаголовок</b>:",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
     await state.set_state(CoverForm.subtitle)
 
 
@@ -356,6 +375,7 @@ async def step_subtitle(message: Message, state: FSMContext):
         "Введите <b>плашки свойств</b> — преимущества через запятую:\n"
         "<i>Пример: улучшает сцепление, для любых поверхностей, быстро сохнет</i>",
         parse_mode="HTML",
+        reply_markup=RESTART_KB,
     )
     await state.set_state(CoverForm.badges)
 
