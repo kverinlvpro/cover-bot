@@ -524,11 +524,15 @@ async def step_card_headline(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.card_subtitle, F.text)
 async def step_card_subtitle(message: Message, state: FSMContext):
-    await state.update_data(subtitle=message.text.strip(), design_request=None)
-    data = await state.get_data()
-    await state.clear()
-    await message.answer("Принято! Запускаю генерацию…", reply_markup=ReplyKeyboardRemove())
-    await run_pipeline(message, data)
+    await state.update_data(subtitle=message.text.strip())
+    await message.answer(
+        "Введите <b>дизайнерский запрос</b> — особая деталь на каждой обложке:\n"
+        "<i>Пример: малярная кисть, фото ДО/ПОСЛЕ, живые цветы</i>\n\n"
+        "Или нажмите «Пропустить»",
+        parse_mode="HTML",
+        reply_markup=SKIP_KB,
+    )
+    await state.set_state(CoverForm.design_request)
 
 
 # === FLEXIBLE FLOW ===
