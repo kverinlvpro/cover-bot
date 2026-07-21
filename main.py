@@ -17,6 +17,7 @@ from aiogram.types import (
 import config
 import claude_client
 import piapi_client
+import sheets_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -31,19 +32,19 @@ class CoverForm(StatesGroup):
     ref_photo = State()
     mode_select = State()
 
-    # === Existing card flow ===
-    card_url = State()
-    color_samples = State()          # wall paint: upload color samples
-    color_code = State()             # wall paint: optional color code (shared between flows)
-    confirm_volume = State()
-    edit_volume = State()
+    # === DB search flow ===
+    product_search = State()        # user types search query
+    missing_rgb = State()           # RGB absent in DB: manual / from photo / skip
+    manual_rgb_input = State()      # user types RGB manually
+    missing_field_input = State()   # user types missing volume or UTPs
     utp_select = State()
     card_headline = State()
     card_subtitle = State()
 
     # === Flexible flow ===
-    paint_type_select = State()      # manual paint type selection
-    flexible_color_samples = State() # wall paint color samples in flexible mode
+    paint_type_select = State()
+    flexible_color_samples = State()
+    color_code = State()            # optional color code step (flexible, wall paint)
     product_name = State()
     volume = State()
     headline = State()
@@ -64,16 +65,16 @@ class FixCallback(CallbackData, prefix="fix"):
     image_id: str
 
 
-class VolConfirmCallback(CallbackData, prefix="vc"):
-    ok: bool
-
-
 class UtpToggleCallback(CallbackData, prefix="utptog"):
     idx: int
 
 
 class UtpDoneCallback(CallbackData, prefix="utpdone"):
     pass
+
+
+class ProductSelectCallback(CallbackData, prefix="psel"):
+    idx: int
 
 
 # --- Keyboards ---
@@ -94,7 +95,7 @@ RESTART_KB = _kb(RESTART_BTN)
 
 MODE_KB = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="🔗 На существующую карточку")],
+        [KeyboardButton(text="📋 Выбрать из базы")],
         [KeyboardButton(text="⚙️ Гибкая настройка")],
         [KeyboardButton(text=RESTART_BTN)],
     ],
@@ -105,15 +106,6 @@ PAINT_TYPE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🪑 Краска для мебели")],
         [KeyboardButton(text="🏠 Краска для стен")],
-        [KeyboardButton(text=RESTART_BTN)],
-    ],
-    resize_keyboard=True,
-)
-
-CARD_FAIL_KB = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔄 Попробовать ещё раз")],
-        [KeyboardButton(text="⚙️ Гибкая настройка")],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -131,6 +123,24 @@ COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
 COLOR_CODE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+MISSING_RGB_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✏️ Ввести RGB вручную")],
+        [KeyboardButton(text="📸 Взять с фото банки")],
+        [KeyboardButton(text="⏭ Пропустить")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+MISSING_DATA_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="✏️ Ввести вручную")],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -162,6 +172,26 @@ def _build_utp_kb(utps: list[str], selected: set) -> InlineKeyboardMarkup:
         text="✅ Подтвердить выбор",
         callback_data=UtpDoneCallback().pack(),
     )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _product_btn_text(p: dict) -> str:
+    parts = [p["name"]]
+    if p["volume"]:
+        parts.append(p["volume"])
+    if p["color_name"]:
+        parts.append(f"| {p['color_name']}")
+    text = " ".join(parts)
+    return text[:64]
+
+
+def _build_search_kb(results: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for i, p in enumerate(results):
+        rows.append([InlineKeyboardButton(
+            text=_product_btn_text(p),
+            callback_data=ProductSelectCallback(idx=i).pack(),
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -219,284 +249,227 @@ async def step_ref_photo_bad(message: Message):
 
 # --- Step 2: Mode selection ---
 
-@dp.message(CoverForm.mode_select, F.text == "🔗 На существующую карточку")
-async def mode_existing_card(message: Message, state: FSMContext):
+@dp.message(CoverForm.mode_select, F.text == "📋 Выбрать из базы")
+async def mode_db(message: Message, state: FSMContext):
     await message.answer(
-        "Отправьте ссылку на товар (Ozon или Wildberries):",
+        "Введите название товара или линейки для поиска:\n"
+        "<i>Например: Velvet, MIA, Classic</i>",
+        parse_mode="HTML",
         reply_markup=RESTART_KB,
     )
-    await state.set_state(CoverForm.card_url)
+    await state.set_state(CoverForm.product_search)
 
 
 @dp.message(CoverForm.mode_select, F.text == "⚙️ Гибкая настройка")
 async def mode_flexible(message: Message, state: FSMContext):
-    await message.answer(
-        "Выберите тип краски:",
-        reply_markup=PAINT_TYPE_KB,
-    )
-    await state.set_state(CoverForm.paint_type_select)
-
-
-# === FLEXIBLE FLOW: paint type selection ===
-
-@dp.message(CoverForm.paint_type_select, F.text.in_({"🪑 Краска для мебели", "🏠 Краска для стен"}))
-async def step_paint_type_select(message: Message, state: FSMContext):
-    paint_type = "walls" if "стен" in message.text else "furniture"
-    await state.update_data(paint_type=paint_type, color_photo_ids=[])
-
-    if paint_type == "walls":
-        await message.answer(
-            "🎨 <b>Краска для стен</b> — загрузите образец цвета и живые фото краски.\n"
-            "Можно отправить до 4 фото по одному.\n"
-            "Когда всё загружено — нажмите «Готово».\n"
-            "Или нажмите «Пропустить».",
-            parse_mode="HTML",
-            reply_markup=COLOR_SAMPLES_KB,
-        )
-        await state.set_state(CoverForm.flexible_color_samples)
-    else:
-        await message.answer(
-            "Введите <b>название товара</b>:",
-            parse_mode="HTML",
-            reply_markup=RESTART_KB,
-        )
-        await state.set_state(CoverForm.product_name)
-
-
-@dp.message(CoverForm.paint_type_select)
-async def step_paint_type_bad(message: Message):
-    await message.answer("Выберите тип краски с помощью кнопок:", reply_markup=PAINT_TYPE_KB)
-
-
-# === FLEXIBLE FLOW: color samples (wall paint) ===
-
-@dp.message(CoverForm.flexible_color_samples, F.photo)
-async def flexible_color_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    ids = list(data.get("color_photo_ids", []))
-    if len(ids) >= 4:
-        await message.answer(
-            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
-            reply_markup=COLOR_SAMPLES_KB,
-        )
-        return
-    ids.append(message.photo[-1].file_id)
-    await state.update_data(color_photo_ids=ids)
-    await message.answer(
-        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
-        reply_markup=COLOR_SAMPLES_KB,
-    )
-
-
-@dp.message(CoverForm.flexible_color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
-async def flexible_color_done(message: Message, state: FSMContext):
-    if message.text == "Пропустить":
-        await state.update_data(color_photo_ids=[])
-    await state.update_data(flow="flexible")
-    await _ask_color_code(message, state)
-
-
-@dp.message(CoverForm.flexible_color_samples)
-async def flexible_color_bad(message: Message):
-    await message.answer(
-        "Отправьте фото или нажмите «Готово» / «Пропустить».",
-        reply_markup=COLOR_SAMPLES_KB,
-    )
-
-
-# === COLOR CODE STEP (wall paint, both flows) ===
-
-async def _ask_color_code(message: Message, state: FSMContext):
-    await message.answer(
-        "Введите <b>код цвета краски</b> — или нажмите «Пропустить».\n\n"
-        "Принимаются любые форматы:\n"
-        "• <b>HEX</b> — #E8E0D0 <i>(рекомендуется, копируется из любого пикера)</i>\n"
-        "• <b>RAL</b> — RAL 9001\n"
-        "• <b>Pantone</b> — Pantone 11-0602 TCX\n"
-        "• <b>NCS</b> — NCS S 0502-Y\n\n"
-        "<i>Код цвета будет добавлен в каждый промт напрямую.</i>",
-        parse_mode="HTML",
-        reply_markup=COLOR_CODE_KB,
-    )
-    await state.set_state(CoverForm.color_code)
-
-
-@dp.message(CoverForm.color_code, F.text)
-async def step_color_code(message: Message, state: FSMContext):
-    text = message.text.strip()
-    color_code = None if text == "Пропустить" else text
-    await state.update_data(color_code=color_code)
-    data = await state.get_data()
-
-    if data.get("flow") == "card":
-        volume = data.get("volume_detected")
-        if volume:
-            await _ask_volume_confirm(message, volume)
-            await state.set_state(CoverForm.confirm_volume)
-        else:
-            await message.answer(
-                "Введите объём (например: 360г, 1л):",
-                reply_markup=RESTART_KB,
-            )
-            await state.set_state(CoverForm.edit_volume)
-    else:
-        await message.answer(
-            "Введите <b>название товара</b>:",
-            parse_mode="HTML",
-            reply_markup=RESTART_KB,
-        )
-        await state.set_state(CoverForm.product_name)
-
-
-# === EXISTING CARD FLOW ===
-
-@dp.message(CoverForm.card_url, F.text == "🔄 Попробовать ещё раз")
-async def card_url_retry(message: Message):
-    await message.answer("Отправьте ссылку ещё раз:", reply_markup=RESTART_KB)
-
-
-@dp.message(CoverForm.card_url, F.text == "⚙️ Гибкая настройка")
-async def card_url_switch_flexible(message: Message, state: FSMContext):
     await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
     await state.set_state(CoverForm.paint_type_select)
 
 
-@dp.message(CoverForm.card_url, F.text)
-async def step_card_url(message: Message, state: FSMContext):
-    url = message.text.strip()
-    status = await message.answer("⏳ Анализирую карточку товара…")
+# === DB SEARCH FLOW ===
+
+@dp.message(CoverForm.product_search, F.text)
+async def step_product_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    status = await message.answer("🔍 Ищу в базе…")
 
     try:
-        analysis = await asyncio.wait_for(claude_client.analyze_card(url), timeout=75)
-    except asyncio.TimeoutError:
-        await status.edit_text("❌ Анализ карточки занял слишком долго — сайт не отвечает.")
-        await message.answer("Что делаем дальше?", reply_markup=CARD_FAIL_KB)
-        return
+        products = await sheets_client.load_products()
     except Exception as e:
-        await status.edit_text(f"❌ Не удалось проанализировать карточку:\n{e}")
-        await message.answer("Что делаем дальше?", reply_markup=CARD_FAIL_KB)
+        await status.edit_text(f"❌ Не удалось загрузить базу: {e}")
         return
 
-    name = analysis.get("name", "Неизвестно")
-    volume = analysis.get("volume")
-    paint_type = analysis.get("paint_type", "furniture")
-    utps = analysis.get("utps", [])
+    results = sheets_client.search_products(query, products)
+
+    if not results:
+        await status.edit_text(
+            f"Ничего не найдено по запросу «{query}».\nПопробуйте другое название.",
+        )
+        return
+
+    if len(results) > 10:
+        await status.edit_text(
+            f"Найдено {len(results)} позиций — слишком много.\n"
+            f"Уточните запрос (добавьте объём или цвет)."
+        )
+        return
+
+    await state.update_data(search_results=results)
+    await status.edit_text(
+        f"Найдено {len(results)} позиций. Выберите товар:",
+        reply_markup=_build_search_kb(results),
+    )
+
+
+@dp.callback_query(ProductSelectCallback.filter(), CoverForm.product_search)
+async def product_select_cb(
+    query: CallbackQuery,
+    callback_data: ProductSelectCallback,
+    state: FSMContext,
+):
+    await query.answer()
+    data = await state.get_data()
+    results: list[dict] = data.get("search_results", [])
+    idx = callback_data.idx
+
+    if idx >= len(results):
+        await query.message.answer("Ошибка выбора, попробуйте снова.", reply_markup=RESTART_KB)
+        return
+
+    product = results[idx]
+    paint_type = product["paint_type"]
 
     await state.update_data(
-        product_name=name,
-        utp_list=utps,
-        utp_selected=[],
+        product_name=product["name"],
         paint_type=paint_type,
         color_photo_ids=[],
+        color_code=product["rgb"] if product["rgb"] else None,
+        utp_list=product["utps"],
+        utp_selected=list(range(len(product["utps"]))),  # pre-select all
     )
-    if volume:
-        await state.update_data(volume_detected=volume)
 
     paint_label = "🏠 для стен" if paint_type == "walls" else "🪑 для мебели"
-    await status.edit_text(
-        f"✅ Карточка проанализирована\n\n"
-        f"<b>Название:</b> {name}\n"
-        f"<b>Тип краски:</b> {paint_label}",
+    color_info = f"\n<b>Цвет:</b> {product['color_name']}" if product["color_name"] else ""
+    rgb_info = f"\n<b>RGB:</b> {product['rgb']}" if product["rgb"] else ""
+
+    await query.message.answer(
+        f"✅ <b>{product['name']}</b>\n"
+        f"<b>Тип:</b> {paint_label}"
+        f"{color_info}{rgb_info}",
         parse_mode="HTML",
     )
 
-    if paint_type == "walls":
-        await message.answer(
-            "🎨 <b>Краска для стен</b> — загрузите образец цвета и живые фото краски.\n"
-            "Можно отправить до 4 фото по одному.\n"
-            "Когда всё загружено — нажмите «Готово».\n"
-            "Или нажмите «Пропустить».",
-            parse_mode="HTML",
-            reply_markup=COLOR_SAMPLES_KB,
-        )
-        await state.set_state(CoverForm.color_samples)
-    elif volume:
-        await _ask_volume_confirm(message, volume)
-        await state.set_state(CoverForm.confirm_volume)
-    else:
-        await message.answer(
-            "Объём не найден в заголовке. Введите вручную (например: 360г, 1л):",
-            reply_markup=RESTART_KB,
-        )
-        await state.set_state(CoverForm.edit_volume)
+    await _continue_db_flow(query.message, state, product)
 
 
-# Color samples step in existing card flow (wall paint)
-
-@dp.message(CoverForm.color_samples, F.photo)
-async def card_color_photo(message: Message, state: FSMContext):
-    data = await state.get_data()
-    ids = list(data.get("color_photo_ids", []))
-    if len(ids) >= 4:
+async def _continue_db_flow(message: Message, state: FSMContext, product: dict):
+    """Check missing fields and route to the right step."""
+    # 1. Volume missing?
+    if not product["volume"]:
         await message.answer(
-            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
-            reply_markup=COLOR_SAMPLES_KB,
+            "⚠️ Объём не указан в базе для этого товара.",
+            reply_markup=MISSING_DATA_KB,
         )
+        await state.update_data(missing_field="volume")
+        await state.set_state(CoverForm.missing_field_input)
         return
-    ids.append(message.photo[-1].file_id)
-    await state.update_data(color_photo_ids=ids)
-    await message.answer(
-        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
-        reply_markup=COLOR_SAMPLES_KB,
-    )
 
+    await state.update_data(volume=product["volume"])
 
-@dp.message(CoverForm.color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
-async def card_color_done(message: Message, state: FSMContext):
-    if message.text == "Пропустить":
-        await state.update_data(color_photo_ids=[])
-    await state.update_data(flow="card")
-    await _ask_color_code(message, state)
-
-
-@dp.message(CoverForm.color_samples)
-async def card_color_bad(message: Message):
-    await message.answer(
-        "Отправьте фото или нажмите «Готово» / «Пропустить».",
-        reply_markup=COLOR_SAMPLES_KB,
-    )
-
-
-async def _ask_volume_confirm(message: Message, volume: str):
-    await message.answer(
-        f"Объём: <b>{volume}</b> — верно?",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Верно", callback_data=VolConfirmCallback(ok=True).pack())],
-            [InlineKeyboardButton(text="✏️ Исправить", callback_data=VolConfirmCallback(ok=False).pack())],
-        ]),
-    )
-
-
-@dp.callback_query(VolConfirmCallback.filter(), CoverForm.confirm_volume)
-async def confirm_volume_cb(query: CallbackQuery, callback_data: VolConfirmCallback, state: FSMContext):
-    await query.answer()
-    await query.message.edit_reply_markup(reply_markup=None)
-    if callback_data.ok:
-        data = await state.get_data()
-        await state.update_data(volume=data["volume_detected"])
-        await _show_utp_selection(query.message, state)
-    else:
-        await query.message.answer(
-            "Введите правильный объём (например: 360г, 1л):",
-            reply_markup=RESTART_KB,
+    # 2. UTPs missing?
+    if not product["utps"]:
+        await message.answer(
+            "⚠️ УТП не указаны в базе для этого товара.",
+            reply_markup=MISSING_DATA_KB,
         )
-        await state.set_state(CoverForm.edit_volume)
+        await state.update_data(missing_field="utps")
+        await state.set_state(CoverForm.missing_field_input)
+        return
 
+    # 3. Wall paint + RGB missing?
+    if product["paint_type"] == "walls" and not product["rgb"]:
+        await message.answer(
+            "⚠️ Код цвета RGB отсутствует в базе.\nКак поступим?",
+            reply_markup=MISSING_RGB_KB,
+        )
+        await state.set_state(CoverForm.missing_rgb)
+        return
 
-@dp.message(CoverForm.edit_volume, F.text)
-async def step_edit_volume(message: Message, state: FSMContext):
-    await state.update_data(volume=message.text.strip())
+    # All good — proceed to UTP selection
     await _show_utp_selection(message, state)
 
+
+# --- Missing field input (volume or UTPs) ---
+
+@dp.message(CoverForm.missing_field_input, F.text == "✏️ Ввести вручную")
+async def missing_field_manual(message: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("missing_field")
+    if field == "volume":
+        await message.answer("Введите объём (например: 2.5л, 800г):", reply_markup=RESTART_KB)
+    else:
+        await message.answer(
+            "Введите УТП через запятую:\n"
+            "<i>Пример: Моющаяся, Без запаха, Быстросохнущая</i>",
+            parse_mode="HTML",
+            reply_markup=RESTART_KB,
+        )
+
+
+@dp.message(CoverForm.missing_field_input, F.text)
+async def step_missing_field(message: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("missing_field")
+    text = message.text.strip()
+
+    if field == "volume":
+        await state.update_data(volume=text)
+        # Check if UTPs are also missing
+        if not data.get("utp_list"):
+            await message.answer(
+                "⚠️ УТП не указаны в базе для этого товара.",
+                reply_markup=MISSING_DATA_KB,
+            )
+            await state.update_data(missing_field="utps")
+            return
+    else:  # utps
+        utps = [u.strip() for u in text.split(",") if u.strip()]
+        await state.update_data(utp_list=utps, utp_selected=list(range(len(utps))))
+
+    paint_type = data.get("paint_type", "furniture")
+    rgb = data.get("color_code") or ""
+    if paint_type == "walls" and not rgb:
+        await message.answer(
+            "⚠️ Код цвета RGB отсутствует в базе.\nКак поступим?",
+            reply_markup=MISSING_RGB_KB,
+        )
+        await state.set_state(CoverForm.missing_rgb)
+        return
+
+    await _show_utp_selection(message, state)
+
+
+# --- Missing RGB handlers ---
+
+@dp.message(CoverForm.missing_rgb, F.text == "✏️ Ввести RGB вручную")
+async def missing_rgb_manual(message: Message, state: FSMContext):
+    await message.answer(
+        "Введите RGB в формате <b>XXX,XXX,XXX</b>:\n"
+        "<i>Пример: 245,240,232</i>",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(CoverForm.manual_rgb_input)
+
+
+@dp.message(CoverForm.missing_rgb, F.text.in_({"📸 Взять с фото банки", "⏭ Пропустить"}))
+async def missing_rgb_skip(message: Message, state: FSMContext):
+    # No explicit RGB — Claude will use reference photo for color
+    await state.update_data(color_code=None)
+    await _show_utp_selection(message, state)
+
+
+@dp.message(CoverForm.missing_rgb)
+async def missing_rgb_bad(message: Message):
+    await message.answer("Выберите вариант с помощью кнопок:", reply_markup=MISSING_RGB_KB)
+
+
+@dp.message(CoverForm.manual_rgb_input, F.text)
+async def step_manual_rgb(message: Message, state: FSMContext):
+    rgb = message.text.strip()
+    await state.update_data(color_code=rgb)
+    await _show_utp_selection(message, state)
+
+
+# --- UTP selection (shared between DB and card flows) ---
 
 async def _show_utp_selection(target: Message, state: FSMContext):
     data = await state.get_data()
     utps = data.get("utp_list", [])
+    selected = set(data.get("utp_selected", []))
     await target.answer(
-        "Выберите УТП (преимущества) для обложки.\n"
-        "Отметьте нужные и нажмите «Подтвердить»:",
-        reply_markup=_build_utp_kb(utps, set()),
+        "Выберите УТП для обложки — снимите галочки с ненужных и нажмите «Подтвердить»:",
+        reply_markup=_build_utp_kb(utps, selected),
     )
     await state.set_state(CoverForm.utp_select)
 
@@ -559,6 +532,86 @@ async def step_card_subtitle(message: Message, state: FSMContext):
 
 
 # === FLEXIBLE FLOW ===
+
+@dp.message(CoverForm.paint_type_select, F.text.in_({"🪑 Краска для мебели", "🏠 Краска для стен"}))
+async def step_paint_type_select(message: Message, state: FSMContext):
+    paint_type = "walls" if "стен" in message.text else "furniture"
+    await state.update_data(paint_type=paint_type, color_photo_ids=[])
+
+    if paint_type == "walls":
+        await message.answer(
+            "🎨 <b>Краска для стен</b> — загрузите образец цвета и живые фото краски.\n"
+            "Можно отправить до 4 фото по одному.\n"
+            "Когда всё загружено — нажмите «Готово».\n"
+            "Или нажмите «Пропустить».",
+            parse_mode="HTML",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        await state.set_state(CoverForm.flexible_color_samples)
+    else:
+        await message.answer(
+            "Введите <b>название товара</b>:",
+            parse_mode="HTML",
+            reply_markup=RESTART_KB,
+        )
+        await state.set_state(CoverForm.product_name)
+
+
+@dp.message(CoverForm.paint_type_select)
+async def step_paint_type_bad(message: Message):
+    await message.answer("Выберите тип краски с помощью кнопок:", reply_markup=PAINT_TYPE_KB)
+
+
+@dp.message(CoverForm.flexible_color_samples, F.photo)
+async def flexible_color_photo(message: Message, state: FSMContext):
+    data = await state.get_data()
+    ids = list(data.get("color_photo_ids", []))
+    if len(ids) >= 4:
+        await message.answer(
+            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        return
+    ids.append(message.photo[-1].file_id)
+    await state.update_data(color_photo_ids=ids)
+    await message.answer(
+        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.flexible_color_samples, F.text.in_({"✅ Готово", "Пропустить"}))
+async def flexible_color_done(message: Message, state: FSMContext):
+    if message.text == "Пропустить":
+        await state.update_data(color_photo_ids=[])
+    await message.answer(
+        "Введите <b>код цвета краски</b> — или нажмите «Пропустить».\n\n"
+        "Форматы: RGB <b>245,240,232</b> · RAL 9001 · Pantone 11-0602 TCX",
+        parse_mode="HTML",
+        reply_markup=COLOR_CODE_KB,
+    )
+    await state.set_state(CoverForm.color_code)
+
+
+@dp.message(CoverForm.flexible_color_samples)
+async def flexible_color_bad(message: Message):
+    await message.answer(
+        "Отправьте фото или нажмите «Готово» / «Пропустить».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.color_code, F.text)
+async def step_color_code(message: Message, state: FSMContext):
+    text = message.text.strip()
+    await state.update_data(color_code=None if text == "Пропустить" else text)
+    await message.answer(
+        "Введите <b>название товара</b>:",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(CoverForm.product_name)
+
 
 @dp.message(CoverForm.product_name, F.text)
 async def step_product_name(message: Message, state: FSMContext):
@@ -638,12 +691,11 @@ def _build_request(data: dict) -> str:
     badges = data["badges"]
     design = data.get("design_request")
     has_photos = bool(data.get("photo_ids"))
+    color_code = data.get("color_code")
 
     design_part = (
         f" В каждой идее обязательно должен присутствовать {design}." if design else ""
     )
-
-    color_code = data.get("color_code")
 
     points = [
         f'1) Нужно сделать дополнительные плашки с преимуществами: "{badges}".',
@@ -657,7 +709,7 @@ def _build_request(data: dict) -> str:
         )
     if color_code:
         points.append(
-            f"{len(points) + 1}) Точный код цвета краски на стенах: {color_code} — "
+            f"{len(points) + 1}) Точный цвет краски на стенах: RGB({color_code}) — "
             "использовать этот цвет для окрашенных поверхностей в каждом варианте."
         )
     points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
@@ -740,6 +792,7 @@ async def run_pipeline(message: Message, data: dict):
         )
     except Exception as e:
         await status.edit_text(f"Ошибка генерации промтов: {e}")
+        await message.answer("Хотите попробовать ещё раз?", reply_markup=AGAIN_KB)
         return
 
     await status.edit_text(
