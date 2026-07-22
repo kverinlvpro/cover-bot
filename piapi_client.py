@@ -72,26 +72,26 @@ async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | No
     return None
 
 
-# Ограничение параллельных запросов к PiAPI
-_sem = asyncio.Semaphore(5)
+# Лимит одновременно активных задач в PiAPI (submit + ожидание результата)
+_sem = asyncio.Semaphore(3)
 
 
 async def generate_image(prompt: str, image_urls: list[str] | None = None) -> str | None:
-    for attempt in range(3):
-        async with _sem:
+    async with _sem:
+        for attempt in range(3):
             task_id = await _submit(prompt, image_urls)
-        if not task_id:
-            wait = (attempt + 1) * 5
-            logger.warning("PiAPI submit failed attempt=%d, retry in %ds", attempt + 1, wait)
-            await asyncio.sleep(wait)
-            continue
+            if not task_id:
+                wait = (attempt + 1) * 5
+                logger.warning("PiAPI submit failed attempt=%d, retry in %ds", attempt + 1, wait)
+                await asyncio.sleep(wait)
+                continue
 
-        url = await _poll(task_id)
-        if url:
-            return url
+            url = await _poll(task_id)
+            if url:
+                return url
 
-        logger.warning("PiAPI poll returned None attempt=%d task_id=%s", attempt + 1, task_id)
-        await asyncio.sleep((attempt + 1) * 5)
+            logger.warning("PiAPI poll returned None attempt=%d task_id=%s", attempt + 1, task_id)
+            await asyncio.sleep((attempt + 1) * 5)
 
-    logger.error("PiAPI all 3 attempts failed")
-    return None
+        logger.error("PiAPI all 3 attempts failed")
+        return None
