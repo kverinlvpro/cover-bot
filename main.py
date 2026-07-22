@@ -959,6 +959,7 @@ async def run_fix_pipeline(
             await status.delete()
         except Exception:
             pass
+        await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
     else:
         await status.edit_text("Не удалось исправить изображение. Попробуйте ещё раз.")
 
