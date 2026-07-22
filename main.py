@@ -38,6 +38,7 @@ class CoverForm(StatesGroup):
     manual_rgb_input = State()      # user types RGB manually
     missing_field_input = State()   # user types missing volume or UTPs
     utp_select = State()
+    manual_utp_add = State()
     card_headline = State()
     card_subtitle = State()
 
@@ -70,6 +71,10 @@ class UtpToggleCallback(CallbackData, prefix="utptog"):
 
 
 class UtpDoneCallback(CallbackData, prefix="utpdone"):
+    pass
+
+
+class UtpAddCallback(CallbackData, prefix="utpadd"):
     pass
 
 
@@ -168,6 +173,10 @@ def _build_utp_kb(utps: list[str], selected: set) -> InlineKeyboardMarkup:
             text=f"{prefix} {utp}",
             callback_data=UtpToggleCallback(idx=i).pack(),
         )])
+    rows.append([InlineKeyboardButton(
+        text="✏️ Вписать свои УТП",
+        callback_data=UtpAddCallback().pack(),
+    )])
     rows.append([InlineKeyboardButton(
         text="✅ Подтвердить выбор",
         callback_data=UtpDoneCallback().pack(),
@@ -490,6 +499,38 @@ async def utp_toggle(query: CallbackQuery, callback_data: UtpToggleCallback, sta
     except Exception:
         pass
     await query.answer()
+
+
+@dp.callback_query(UtpAddCallback.filter(), CoverForm.utp_select)
+async def utp_add_start(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    await query.message.answer(
+        "Введите свои УТП через запятую — они добавятся к списку:\n"
+        "<i>Пример: Без запаха, Моющаяся, Быстросохнущая</i>",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(CoverForm.manual_utp_add)
+
+
+@dp.message(CoverForm.manual_utp_add, F.text)
+async def step_manual_utp_add(message: Message, state: FSMContext):
+    new_utps = [u.strip() for u in message.text.split(",") if u.strip()]
+    data = await state.get_data()
+    utps: list[str] = list(data.get("utp_list", []))
+    selected: set = set(data.get("utp_selected", []))
+
+    start_idx = len(utps)
+    utps.extend(new_utps)
+    for i in range(start_idx, len(utps)):
+        selected.add(i)
+
+    await state.update_data(utp_list=utps, utp_selected=list(selected))
+    await state.set_state(CoverForm.utp_select)
+    await message.answer(
+        f"Добавлено {len(new_utps)} УТП. Проверьте список и подтвердите выбор:",
+        reply_markup=_build_utp_kb(utps, selected),
+    )
 
 
 @dp.callback_query(UtpDoneCallback.filter(), CoverForm.utp_select)
