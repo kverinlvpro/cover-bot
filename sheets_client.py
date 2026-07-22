@@ -58,6 +58,7 @@ async def load_products(force: bool = False) -> list[dict]:
         utps_raw = row.get("УТП", "").strip()
         products.append({
             "name": name,
+            "artikul": row.get("Артикул", "").strip(),
             "category": row.get("Категория", "").strip(),
             "line": row.get("Линейка", "").strip(),
             "volume": row.get("Фасовка для МП", "").strip(),
@@ -79,5 +80,7 @@ def search_products(query: str, products: list[dict]) -> list[dict]:
         return []
     return [
         p for p in products
-        if q in p["name"].lower() or q in p["line"].lower()
+        if q in p["name"].lower()
+        or q in p["line"].lower()
+        or q in p["artikul"].lower()
     ]
