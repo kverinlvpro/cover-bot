@@ -885,22 +885,21 @@ def _build_request(data: dict) -> str:
             "без каких-либо изменений формы, этикетки и цвета."
         )
     if color_code or color_name:
-        color_label = ""
-        if color_name and color_code:
-            color_label = f"«{color_name}», RGB({color_code})"
-        elif color_code:
-            color_label = f"RGB({color_code})"
-        elif color_name:
-            color_label = f"«{color_name}»"
+        name_part = f"«{color_name}»" if color_name else ""
+        rgb_part = f"RGB({color_code})" if color_code else ""
+        tech_hint = f" (точный оттенок для нейросети: {rgb_part})" if rgb_part else ""
+        display = name_part or rgb_part
+        name_on_cover = f"«{color_name}»" if color_name else ""
+        no_rgb_note = f" На обложке пишется только красивое название {name_on_cover}, RGB-код нигде не указывается." if color_name else " RGB-код на обложке не пишется."
         if paint_type == "walls":
             points.append(
-                f"{len(points) + 1}) Точный цвет краски: {color_label} — "
-                "окрашенные поверхности (стены, потолок) в каждом варианте строго этого оттенка."
+                f"{len(points) + 1}) Цвет краски: {display}{tech_hint} — "
+                f"окрашенные поверхности строго этого оттенка.{no_rgb_note}"
             )
         else:
             points.append(
-                f"{len(points) + 1}) Точный цвет краски: {color_label} — "
-                "оттенок на окрашенной поверхности и снаружи/внутри банки точно соответствует."
+                f"{len(points) + 1}) Цвет краски: {display}{tech_hint} — "
+                f"оттенок на окрашенной поверхности и банке точно соответствует.{no_rgb_note}"
             )
     points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
 
