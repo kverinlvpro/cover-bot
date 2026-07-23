@@ -257,7 +257,7 @@ async def generate_prompts(
         if m:
             prompts.append(m.group(1).strip())
 
-    if len(prompts) < 8:
+    if len(prompts) < 4:
         raise ValueError(f"Claude вернул только {len(prompts)} промтов из 10. Ответ: {raw[:300]}")
 
     return prompts[:10]
