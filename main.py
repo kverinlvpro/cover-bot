@@ -93,10 +93,20 @@ def _kb(*labels: str) -> ReplyKeyboardMarkup:
 
 
 RESTART_BTN = "🔄 Заново"
+BACK_BTN = "⬅️ Назад"
 SKIP_KB = _kb("Пропустить", RESTART_BTN)
 START_KB = _kb("🚀 Запустить бот")
 AGAIN_KB = _kb("🔄 Сгенерировать ещё")
 RESTART_KB = _kb(RESTART_BTN)
+BACK_RESTART_KB = _kb(BACK_BTN, RESTART_BTN)
+BACK_SKIP_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text=BACK_BTN)],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
 
 MODE_KB = ReplyKeyboardMarkup(
     keyboard=[
@@ -111,6 +121,7 @@ PAINT_TYPE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🪑 Краска для мебели")],
         [KeyboardButton(text="🏠 Краска для стен")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -120,6 +131,7 @@ COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✅ Готово")],
         [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -128,6 +140,7 @@ COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
 COLOR_CODE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Пропустить")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -138,6 +151,7 @@ MISSING_RGB_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="✏️ Ввести RGB вручную")],
         [KeyboardButton(text="📸 Взять с фото банки")],
         [KeyboardButton(text="⏭ Пропустить")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -146,6 +160,7 @@ MISSING_RGB_KB = ReplyKeyboardMarkup(
 MISSING_DATA_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="✏️ Ввести вручную")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -204,6 +219,118 @@ def _build_search_kb(results: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+# --- Universal back navigation (must be registered FIRST) ---
+
+@dp.message(F.text == BACK_BTN)
+async def handle_back(message: Message, state: FSMContext):
+    current = await state.get_state()
+    data = await state.get_data()
+
+    # DB flow
+    if current == CoverForm.product_search.state:
+        await message.answer("Выберите режим:", reply_markup=MODE_KB)
+        await state.set_state(CoverForm.mode_select)
+
+    elif current in (CoverForm.missing_rgb.state, CoverForm.missing_field_input.state):
+        results = data.get("search_results", [])
+        if results:
+            await message.answer("Выберите товар:", reply_markup=_build_search_kb(results))
+        else:
+            await message.answer("Введите название для поиска:", reply_markup=RESTART_KB)
+        await state.set_state(CoverForm.product_search)
+
+    elif current == CoverForm.manual_rgb_input.state:
+        await message.answer("Как поступим с цветом?", reply_markup=MISSING_RGB_KB)
+        await state.set_state(CoverForm.missing_rgb)
+
+    elif current == CoverForm.manual_utp_add.state:
+        utps = data.get("utp_list", [])
+        selected = set(data.get("utp_selected", []))
+        await message.answer("Выберите УТП:", reply_markup=_build_utp_kb(utps, selected))
+        await state.set_state(CoverForm.utp_select)
+
+    elif current == CoverForm.card_headline.state:
+        utps = data.get("utp_list", [])
+        selected = set(data.get("utp_selected", []))
+        await message.answer(
+            "Выберите УТП для обложки — снимите галочки с ненужных:",
+            reply_markup=_build_utp_kb(utps, selected),
+        )
+        await state.set_state(CoverForm.utp_select)
+
+    elif current == CoverForm.card_subtitle.state:
+        await message.answer(
+            "Введите <b>заголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.card_headline)
+
+    # Shared design_request
+    elif current == CoverForm.design_request.state:
+        flow = data.get("flow", "db")
+        if flow == "flexible":
+            await message.answer(
+                "Введите <b>плашки свойств</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+            )
+            await state.set_state(CoverForm.badges)
+        else:
+            await message.answer(
+                "Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+            )
+            await state.set_state(CoverForm.card_subtitle)
+
+    # Flexible flow
+    elif current == CoverForm.paint_type_select.state:
+        await message.answer("Выберите режим:", reply_markup=MODE_KB)
+        await state.set_state(CoverForm.mode_select)
+
+    elif current == CoverForm.flexible_color_samples.state:
+        await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
+        await state.set_state(CoverForm.paint_type_select)
+
+    elif current == CoverForm.color_code.state:
+        await message.answer(
+            "Загрузите образец цвета или нажмите «Пропустить»:",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        await state.set_state(CoverForm.flexible_color_samples)
+
+    elif current == CoverForm.product_name.state:
+        paint_type = data.get("paint_type", "furniture")
+        if paint_type == "walls":
+            await message.answer("Введите код цвета:", reply_markup=COLOR_CODE_KB)
+            await state.set_state(CoverForm.color_code)
+        else:
+            await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
+            await state.set_state(CoverForm.paint_type_select)
+
+    elif current == CoverForm.volume.state:
+        await message.answer(
+            "Введите <b>название товара</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.product_name)
+
+    elif current == CoverForm.headline.state:
+        await message.answer(
+            "Введите <b>объём товара</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.volume)
+
+    elif current == CoverForm.subtitle.state:
+        await message.answer(
+            "Введите <b>заголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.headline)
+
+    elif current == CoverForm.badges.state:
+        await message.answer(
+            "Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.subtitle)
+
+    else:
+        await message.answer("На этом шаге вернуться назад нельзя.", reply_markup=RESTART_KB)
+
+
 # --- /start and /cancel ---
 
 async def _start_form(message: Message, state: FSMContext):
@@ -260,6 +387,7 @@ async def step_ref_photo_bad(message: Message):
 
 @dp.message(CoverForm.mode_select, F.text == "📋 Выбрать из базы")
 async def mode_db(message: Message, state: FSMContext):
+    await state.update_data(flow="db")
     await message.answer(
         "Введите название товара или линейки для поиска:\n"
         "<i>Например: Velvet, MIA, Classic</i>",
@@ -271,6 +399,7 @@ async def mode_db(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.mode_select, F.text == "⚙️ Гибкая настройка")
 async def mode_flexible(message: Message, state: FSMContext):
+    await state.update_data(flow="flexible")
     await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
     await state.set_state(CoverForm.paint_type_select)
 
@@ -333,6 +462,7 @@ async def product_select_cb(
         paint_type=paint_type,
         color_photo_ids=[],
         color_code=product["rgb"] if product["rgb"] else None,
+        color_name=product["color_name"],
         utp_list=product["utps"],
         utp_selected=list(range(len(product["utps"]))),  # pre-select all
     )
@@ -551,7 +681,7 @@ async def utp_done(query: CallbackQuery, state: FSMContext):
     await query.message.answer(
         "Введите <b>заголовок</b> — главный текст на обложке:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.card_headline)
 
@@ -559,7 +689,7 @@ async def utp_done(query: CallbackQuery, state: FSMContext):
 @dp.message(CoverForm.card_headline, F.text)
 async def step_card_headline(message: Message, state: FSMContext):
     await state.update_data(headline=message.text.strip())
-    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=RESTART_KB)
+    await message.answer("Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB)
     await state.set_state(CoverForm.card_subtitle)
 
 
@@ -571,7 +701,7 @@ async def step_card_subtitle(message: Message, state: FSMContext):
         "<i>Пример: малярная кисть, фото ДО/ПОСЛЕ, живые цветы</i>\n\n"
         "Или нажмите «Пропустить»",
         parse_mode="HTML",
-        reply_markup=SKIP_KB,
+        reply_markup=BACK_SKIP_KB,
     )
     await state.set_state(CoverForm.design_request)
 
@@ -597,7 +727,7 @@ async def step_paint_type_select(message: Message, state: FSMContext):
         await message.answer(
             "Введите <b>название товара</b>:",
             parse_mode="HTML",
-            reply_markup=RESTART_KB,
+            reply_markup=BACK_RESTART_KB,
         )
         await state.set_state(CoverForm.product_name)
 
@@ -653,7 +783,7 @@ async def step_color_code(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>название товара</b>:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.product_name)
 
@@ -664,7 +794,7 @@ async def step_product_name(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>объём товара</b> (например: 360г, 1л, 500мл):",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.volume)
 
@@ -675,7 +805,7 @@ async def step_volume(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>заголовок</b> — главный текст на обложке:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.headline)
 
@@ -686,7 +816,7 @@ async def step_headline(message: Message, state: FSMContext):
     await message.answer(
         "Введите <b>подзаголовок</b>:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.subtitle)
 
@@ -698,7 +828,7 @@ async def step_subtitle(message: Message, state: FSMContext):
         "Введите <b>плашки свойств</b> — преимущества через запятую:\n"
         "<i>Пример: улучшает сцепление, для любых поверхностей, быстро сохнет</i>",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.badges)
 
@@ -711,7 +841,7 @@ async def step_badges(message: Message, state: FSMContext):
         "<i>Пример: малярная кисть, фото ДО/ПОСЛЕ, живые цветы</i>\n\n"
         "Или нажмите «Пропустить»",
         parse_mode="HTML",
-        reply_markup=SKIP_KB,
+        reply_markup=BACK_SKIP_KB,
     )
     await state.set_state(CoverForm.design_request)
 
@@ -737,6 +867,8 @@ def _build_request(data: dict) -> str:
     design = data.get("design_request")
     has_photos = bool(data.get("photo_ids"))
     color_code = data.get("color_code")
+    color_name = data.get("color_name", "")
+    paint_type = data.get("paint_type", "furniture")
 
     design_part = (
         f" В каждой идее обязательно должен присутствовать {design}." if design else ""
@@ -752,11 +884,24 @@ def _build_request(data: dict) -> str:
             "4) Товар (упаковку/банку) взять СТРОГО с референсного изображения "
             "без каких-либо изменений формы, этикетки и цвета."
         )
-    if color_code:
-        points.append(
-            f"{len(points) + 1}) Точный цвет краски на стенах: RGB({color_code}) — "
-            "использовать этот цвет для окрашенных поверхностей в каждом варианте."
-        )
+    if color_code or color_name:
+        color_label = ""
+        if color_name and color_code:
+            color_label = f"«{color_name}», RGB({color_code})"
+        elif color_code:
+            color_label = f"RGB({color_code})"
+        elif color_name:
+            color_label = f"«{color_name}»"
+        if paint_type == "walls":
+            points.append(
+                f"{len(points) + 1}) Точный цвет краски: {color_label} — "
+                "окрашенные поверхности (стены, потолок) в каждом варианте строго этого оттенка."
+            )
+        else:
+            points.append(
+                f"{len(points) + 1}) Точный цвет краски: {color_label} — "
+                "оттенок на окрашенной поверхности и снаружи/внутри банки точно соответствует."
+            )
     points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
 
     return (
