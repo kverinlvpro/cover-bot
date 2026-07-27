@@ -58,6 +58,11 @@ class FixForm(StatesGroup):
     awaiting_correction = State()
 
 
+class MultiplyFeedbackForm(StatesGroup):
+    awaiting_feedback = State()
+    awaiting_new_ref = State()
+
+
 class MultiplyCallback(CallbackData, prefix="mul"):
     image_id: str
 
@@ -1078,7 +1083,11 @@ async def run_pipeline(message: Message, data: dict):
 # --- Multiply idea ---
 
 @dp.callback_query(MultiplyCallback.filter())
-async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
+async def multiply_idea(
+    query: CallbackQuery,
+    callback_data: MultiplyCallback,
+    state: FSMContext,
+):
     data = _image_store.get(callback_data.image_id)
     if not data:
         await query.answer("Данные не найдены — перезапустите генерацию.", show_alert=True)
@@ -1111,6 +1120,68 @@ async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
         await status.edit_text(f"Готово! Сгенерировано ещё {done['ok']}/3 обложек.")
     except Exception:
         pass
+
+    await state.update_data(
+        multiply_prompt=prompt,
+        multiply_ref_file_ids=ref_file_ids,
+    )
+    await state.set_state(MultiplyFeedbackForm.awaiting_feedback)
+    await query.message.answer(
+        "Банка на размноженных изображениях получилась правильной?",
+        reply_markup=_kb("✅ Да, банка верная", "❌ Нет, банка изменилась"),
+    )
+
+
+MULTIPLY_FEEDBACK_YES = "✅ Да, банка верная"
+MULTIPLY_FEEDBACK_NO = "❌ Нет, банка изменилась"
+
+
+@dp.message(MultiplyFeedbackForm.awaiting_feedback, F.text == MULTIPLY_FEEDBACK_YES)
+async def multiply_feedback_yes(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
+
+
+@dp.message(MultiplyFeedbackForm.awaiting_feedback, F.text == MULTIPLY_FEEDBACK_NO)
+async def multiply_feedback_no(message: Message, state: FSMContext):
+    await message.answer(
+        "Прикрепите фото банки — пересгенерирую эти же обложки с правильной банкой:",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(MultiplyFeedbackForm.awaiting_new_ref)
+
+
+@dp.message(MultiplyFeedbackForm.awaiting_new_ref, F.photo)
+async def multiply_new_ref(message: Message, state: FSMContext):
+    data = await state.get_data()
+    prompt = data.get("multiply_prompt", "")
+    new_ref_fid = message.photo[-1].file_id
+    new_ref_url = await _tg_url(new_ref_fid)
+    await state.clear()
+
+    status = await message.answer("Генерирую 3 обложки с правильной банкой…")
+    done = {"n": 0, "ok": 0}
+
+    async def gen_and_send(idx: int):
+        url = await piapi_client.generate_image(prompt, [new_ref_url] if new_ref_url else None)
+        done["n"] += 1
+        if url:
+            done["ok"] += 1
+            await _send_image(message, url, prompt, f"Исправленное {idx}/3", [new_ref_fid])
+        else:
+            await message.answer(f"Исправленное {idx}: генерация не удалась.")
+        try:
+            await status.edit_text(f"Обработано {done['n']}/3 | Готово: {done['ok']}")
+        except Exception:
+            pass
+
+    await asyncio.gather(*[gen_and_send(i + 1) for i in range(3)])
+
+    try:
+        await status.edit_text(f"Готово! {done['ok']}/3 обложек с правильной банкой.")
+    except Exception:
+        pass
+    await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
 
 
 # --- Fix photo ---
