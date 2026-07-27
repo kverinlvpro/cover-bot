@@ -79,12 +79,10 @@ async def load_products(force: bool = False) -> list[dict]:
 
 
 def search_products(query: str, products: list[dict]) -> list[dict]:
-    q = query.lower().strip()
-    if not q:
+    words = [w for w in query.lower().strip().split() if w]
+    if not words:
         return []
-    return [
-        p for p in products
-        if q in p["name"].lower()
-        or q in p["line"].lower()
-        or q in p["artikul"].lower()
-    ]
+    def matches(p: dict) -> bool:
+        haystack = " ".join([p["name"], p["line"], p["artikul"]]).lower()
+        return all(w in haystack for w in words)
+    return [p for p in products if matches(p)]
