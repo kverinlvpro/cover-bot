@@ -121,11 +121,20 @@ PAINT_TYPE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🪑 Краска для мебели")],
         [KeyboardButton(text="🏠 Краска для стен")],
+        [KeyboardButton(text="✨ Лак для мебели")],
+        [KeyboardButton(text="🔩 Грунтовка для мебели")],
         [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
 )
+
+_PAINT_TYPE_OPTIONS = {
+    "🪑 Краска для мебели": "furniture",
+    "🏠 Краска для стен": "walls",
+    "✨ Лак для мебели": "lacquer",
+    "🔩 Грунтовка для мебели": "primer",
+}
 
 COLOR_SAMPLES_KB = ReplyKeyboardMarkup(
     keyboard=[
@@ -708,9 +717,9 @@ async def step_card_subtitle(message: Message, state: FSMContext):
 
 # === FLEXIBLE FLOW ===
 
-@dp.message(CoverForm.paint_type_select, F.text.in_({"🪑 Краска для мебели", "🏠 Краска для стен"}))
+@dp.message(CoverForm.paint_type_select, F.text.in_(_PAINT_TYPE_OPTIONS))
 async def step_paint_type_select(message: Message, state: FSMContext):
-    paint_type = "walls" if "стен" in message.text else "furniture"
+    paint_type = _PAINT_TYPE_OPTIONS[message.text]
     await state.update_data(paint_type=paint_type, color_photo_ids=[])
 
     if paint_type == "walls":

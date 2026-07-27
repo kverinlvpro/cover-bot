@@ -29,6 +29,10 @@ def _get_paint_type(category: str) -> str:
     cat = category.lower()
     if any(w in cat for w in ("стен", "потолок", "фасад", "интерьер", "обои")):
         return "walls"
+    if any(w in cat for w in ("лак", "лаки")):
+        return "lacquer"
+    if any(w in cat for w in ("грунт",)):
+        return "primer"
     return "furniture"
 
 
