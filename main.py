@@ -867,6 +867,19 @@ async def step_design_request(message: Message, state: FSMContext):
 
 # --- Utilities ---
 
+def _detect_lacquer_finish(text: str) -> str:
+    t = text.lower()
+    if any(w in t for w in ("полуматов", "шелковист", "satin", "полу-матов")):
+        return "полуматовый"
+    if any(w in t for w in ("полуглянц", "полу-глянц")):
+        return "полуглянцевый"
+    if any(w in t for w in ("матов", "matte")):
+        return "матовый"
+    if any(w in t for w in ("глянц", "gloss")):
+        return "глянцевый"
+    return ""
+
+
 def _build_request(data: dict) -> str:
     product = data["product_name"]
     volume = data["volume"]
@@ -893,6 +906,14 @@ def _build_request(data: dict) -> str:
             "4) Товар (упаковку/банку) взять СТРОГО с референсного изображения "
             "без каких-либо изменений формы, этикетки и цвета."
         )
+    if paint_type == "lacquer":
+        finish = _detect_lacquer_finish(product)
+        if finish:
+            points.append(
+                f"{len(points) + 1}) Лак {finish} — поверхность на обложке визуально передаёт "
+                f"эффект {finish} покрытия (строго {finish}, не путать с другими типами)."
+            )
+
     if color_code or color_name:
         name_part = f"«{color_name}»" if color_name else ""
         rgb_part = f"RGB({color_code})" if color_code else ""
