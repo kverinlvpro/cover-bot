@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import uuid
 
 from aiogram import Bot, Dispatcher, F
@@ -39,6 +40,7 @@ class CoverForm(StatesGroup):
     missing_field_input = State()   # user types missing volume or UTPs
     utp_select = State()
     manual_utp_add = State()
+    volume_unit_select = State()
     card_headline = State()
     card_subtitle = State()
 
@@ -179,6 +181,40 @@ MISSING_DATA_KB = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+
+
+def _is_weight(volume: str) -> bool:
+    return bool(re.search(r'\d[\d.,]*\s*(?:кг|г)\b', volume.lower()))
+
+
+def _convert_weight(volume: str, target: str) -> str:
+    m = re.match(r'^\s*([\d.,]+)\s*(кг|г)\s*$', volume.strip(), re.IGNORECASE)
+    if not m:
+        return volume
+    try:
+        num = float(m.group(1).replace(',', '.'))
+        unit = m.group(2).lower()
+    except ValueError:
+        return volume
+    if target == 'г' and unit == 'кг':
+        return f"{int(num * 1000)} г"
+    if target == 'кг' and unit == 'г':
+        kg = num / 1000
+        formatted = f"{kg:.3g}".rstrip('0').rstrip('.')
+        return f"{formatted} кг"
+    return volume
+
+
+def _volume_unit_kb(volume: str) -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=f"✅ Как есть ({volume})")],
+            [KeyboardButton(text="⚖️ В кг")],
+            [KeyboardButton(text="⚖️ В граммах")],
+            [KeyboardButton(text=RESTART_BTN)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def _image_kb(image_id: str) -> InlineKeyboardMarkup:
@@ -495,6 +531,68 @@ async def product_select_cb(
     await _continue_db_flow(query.message, state, product)
 
 
+async def _continue_db_after_volume(message: Message, state: FSMContext):
+    """Continue DB flow after volume is confirmed (check UTPs → RGB → UTP selection)."""
+    data = await state.get_data()
+    if not data.get("utp_list"):
+        await message.answer(
+            "⚠️ УТП не указаны в базе для этого товара.",
+            reply_markup=MISSING_DATA_KB,
+        )
+        await state.update_data(missing_field="utps")
+        await state.set_state(CoverForm.missing_field_input)
+        return
+    if data.get("paint_type") == "walls" and not (data.get("color_code") or ""):
+        await message.answer(
+            "⚠️ Код цвета RGB отсутствует в базе.\nКак поступим?",
+            reply_markup=MISSING_RGB_KB,
+        )
+        await state.set_state(CoverForm.missing_rgb)
+        return
+    await _show_utp_selection(message, state)
+
+
+async def _ask_volume_unit_or_continue(message: Message, state: FSMContext):
+    """After volume is set: ask unit if it's a weight, else continue the flow."""
+    data = await state.get_data()
+    volume = data.get("volume", "")
+    if _is_weight(volume):
+        await message.answer(
+            f"Как писать вес на обложке?",
+            reply_markup=_volume_unit_kb(volume),
+        )
+        await state.set_state(CoverForm.volume_unit_select)
+    else:
+        await _after_volume_unit_confirmed(message, state)
+
+
+async def _after_volume_unit_confirmed(message: Message, state: FSMContext):
+    """Continue after volume unit is confirmed."""
+    data = await state.get_data()
+    if data.get("flow") == "flexible":
+        await message.answer(
+            "Введите <b>заголовок</b> — главный текст на обложке:",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.headline)
+    else:
+        await _continue_db_after_volume(message, state)
+
+
+@dp.message(CoverForm.volume_unit_select, F.text)
+async def step_volume_unit_select(message: Message, state: FSMContext):
+    text = message.text.strip()
+    data = await state.get_data()
+    volume = data.get("volume", "")
+    if "граммах" in text or text == "⚖️ В граммах":
+        volume = _convert_weight(volume, "г")
+    elif "кг" in text and "как есть" not in text.lower():
+        volume = _convert_weight(volume, "кг")
+    await state.update_data(volume=volume)
+    await _after_volume_unit_confirmed(message, state)
+
+
 async def _continue_db_flow(message: Message, state: FSMContext, product: dict):
     """Check missing fields and route to the right step."""
     # 1. Volume missing?
@@ -508,28 +606,7 @@ async def _continue_db_flow(message: Message, state: FSMContext, product: dict):
         return
 
     await state.update_data(volume=product["volume"])
-
-    # 2. UTPs missing?
-    if not product["utps"]:
-        await message.answer(
-            "⚠️ УТП не указаны в базе для этого товара.",
-            reply_markup=MISSING_DATA_KB,
-        )
-        await state.update_data(missing_field="utps")
-        await state.set_state(CoverForm.missing_field_input)
-        return
-
-    # 3. Wall paint + RGB missing?
-    if product["paint_type"] == "walls" and not product["rgb"]:
-        await message.answer(
-            "⚠️ Код цвета RGB отсутствует в базе.\nКак поступим?",
-            reply_markup=MISSING_RGB_KB,
-        )
-        await state.set_state(CoverForm.missing_rgb)
-        return
-
-    # All good — proceed to UTP selection
-    await _show_utp_selection(message, state)
+    await _ask_volume_unit_or_continue(message, state)
 
 
 # --- Missing field input (volume or UTPs) ---
@@ -557,14 +634,8 @@ async def step_missing_field(message: Message, state: FSMContext):
 
     if field == "volume":
         await state.update_data(volume=text)
-        # Check if UTPs are also missing
-        if not data.get("utp_list"):
-            await message.answer(
-                "⚠️ УТП не указаны в базе для этого товара.",
-                reply_markup=MISSING_DATA_KB,
-            )
-            await state.update_data(missing_field="utps")
-            return
+        await _ask_volume_unit_or_continue(message, state)
+        return
     else:  # utps
         utps = [u.strip() for u in text.split(",") if u.strip()]
         await state.update_data(utp_list=utps, utp_selected=list(range(len(utps))))
@@ -815,13 +886,8 @@ async def step_product_name(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.volume, F.text)
 async def step_volume(message: Message, state: FSMContext):
-    await state.update_data(volume=message.text.strip())
-    await message.answer(
-        "Введите <b>заголовок</b> — главный текст на обложке:",
-        parse_mode="HTML",
-        reply_markup=BACK_RESTART_KB,
-    )
-    await state.set_state(CoverForm.headline)
+    await state.update_data(volume=message.text.strip(), flow="flexible")
+    await _ask_volume_unit_or_continue(message, state)
 
 
 @dp.message(CoverForm.headline, F.text)
