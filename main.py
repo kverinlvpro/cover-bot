@@ -949,12 +949,22 @@ async def _tg_url(file_id: str) -> str | None:
         return None
 
 
+async def _fresh_ref_urls(ref_file_ids: list[str]) -> list[str]:
+    """Get fresh Telegram download URLs from permanent file_ids."""
+    urls = []
+    for fid in ref_file_ids:
+        u = await _tg_url(fid)
+        if u:
+            urls.append(u)
+    return urls
+
+
 async def _send_image(
     target: Message, url: str, prompt: str, label: str,
-    ref_urls: list[str] | None = None,
+    ref_file_ids: list[str] | None = None,
 ):
     image_id = uuid.uuid4().hex[:10]
-    _image_store[image_id] = {"prompt": prompt, "url": url, "ref_urls": ref_urls or []}
+    _image_store[image_id] = {"prompt": prompt, "url": url, "ref_file_ids": ref_file_ids or []}
     caption = f"{label}\n\n<i>{prompt[:800]}</i>"
     try:
         await target.answer_photo(
@@ -1022,11 +1032,8 @@ async def run_pipeline(message: Message, data: dict):
         "Обычно занимает 1–2 минуты."
     )
 
-    ref_urls: list[str] = []
-    for fid in photo_ids[:4]:
-        url = await _tg_url(fid)
-        if url:
-            ref_urls.append(url)
+    ref_file_ids = photo_ids[:4]
+    ref_urls = await _fresh_ref_urls(ref_file_ids)
 
     done = {"n": 0, "ok": 0}
 
@@ -1040,7 +1047,7 @@ async def run_pipeline(message: Message, data: dict):
         if url:
             done["ok"] += 1
             try:
-                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_urls)
+                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_file_ids)
             except Exception as e:
                 logging.error("_send_image idx=%d error: %s", idx, e)
         else:
@@ -1082,14 +1089,15 @@ async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
     prompt = data["prompt"]
     done = {"n": 0, "ok": 0}
 
-    ref_urls = data.get("ref_urls") or None
+    ref_file_ids = data.get("ref_file_ids") or []
+    ref_urls = await _fresh_ref_urls(ref_file_ids)
 
     async def gen_and_send(idx: int):
-        url = await piapi_client.generate_image(prompt, ref_urls)
+        url = await piapi_client.generate_image(prompt, ref_urls or None)
         done["n"] += 1
         if url:
             done["ok"] += 1
-            await _send_image(query.message, url, prompt, f"Размножение {idx}/3", ref_urls)
+            await _send_image(query.message, url, prompt, f"Размножение {idx}/3", ref_file_ids)
         else:
             await query.message.answer(f"Размножение {idx}: генерация не удалась.")
         try:
@@ -1137,7 +1145,7 @@ async def fix_with_text(message: Message, state: FSMContext):
     if not image_data:
         await message.answer("Данные не найдены. Попробуйте нажать кнопку ещё раз.")
         return
-    await run_fix_pipeline(message, image_data, message.text.strip(), extra_ref_url=None)
+    await run_fix_pipeline(message, image_data, message.text.strip(), extra_ref_file_id=None)
 
 
 @dp.message(FixForm.awaiting_correction, F.photo)
@@ -1150,31 +1158,38 @@ async def fix_with_photo(message: Message, state: FSMContext):
         await message.answer("Данные не найдены. Попробуйте нажать кнопку ещё раз.")
         return
     correction = message.caption or "Исправь согласно приложенному референсу"
-    extra_ref_url = await _tg_url(message.photo[-1].file_id)
-    await run_fix_pipeline(message, image_data, correction, extra_ref_url)
+    await run_fix_pipeline(message, image_data, correction, extra_ref_file_id=message.photo[-1].file_id)
 
 
 async def run_fix_pipeline(
     message: Message,
     image_data: dict,
     correction: str,
-    extra_ref_url: str | None,
+    extra_ref_file_id: str | None,
 ):
     original_url = image_data["url"]
+    ref_file_ids: list[str] = image_data.get("ref_file_ids", [])
+
     fix_prompt = (
         f"Возьми изображение как основу и внеси следующие исправления: {correction}. "
         f"Сохрани общую композицию, стиль и расположение остальных элементов без изменений. "
         f"Вертикальный формат 3:4, современный UX/UI дизайн, "
         f"высококачественная коммерческая обложка для маркетплейса."
     )
+
+    # Fresh URLs: original generated image + fresh Telegram ref + extra ref photo
     image_urls = [original_url]
-    if extra_ref_url:
-        image_urls.append(extra_ref_url)
+    fresh_refs = await _fresh_ref_urls(ref_file_ids)
+    image_urls.extend(fresh_refs)
+    if extra_ref_file_id:
+        extra_url = await _tg_url(extra_ref_file_id)
+        if extra_url:
+            image_urls.append(extra_url)
 
     status = await message.answer("Исправляю изображение…")
     url = await piapi_client.generate_image(fix_prompt, image_urls)
     if url:
-        await _send_image(message, url, fix_prompt, "Исправленный вариант")
+        await _send_image(message, url, fix_prompt, "Исправленный вариант", ref_file_ids)
         try:
             await status.delete()
         except Exception:
