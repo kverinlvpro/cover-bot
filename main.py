@@ -919,9 +919,12 @@ async def _tg_url(file_id: str) -> str | None:
         return None
 
 
-async def _send_image(target: Message, url: str, prompt: str, label: str):
+async def _send_image(
+    target: Message, url: str, prompt: str, label: str,
+    ref_urls: list[str] | None = None,
+):
     image_id = uuid.uuid4().hex[:10]
-    _image_store[image_id] = {"prompt": prompt, "url": url}
+    _image_store[image_id] = {"prompt": prompt, "url": url, "ref_urls": ref_urls or []}
     caption = f"{label}\n\n<i>{prompt[:800]}</i>"
     try:
         await target.answer_photo(
@@ -1007,7 +1010,7 @@ async def run_pipeline(message: Message, data: dict):
         if url:
             done["ok"] += 1
             try:
-                await _send_image(message, url, prompt, f"Вариант {idx}/10")
+                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_urls)
             except Exception as e:
                 logging.error("_send_image idx=%d error: %s", idx, e)
         else:
@@ -1049,12 +1052,14 @@ async def multiply_idea(query: CallbackQuery, callback_data: MultiplyCallback):
     prompt = data["prompt"]
     done = {"n": 0, "ok": 0}
 
+    ref_urls = data.get("ref_urls") or None
+
     async def gen_and_send(idx: int):
-        url = await piapi_client.generate_image(prompt)
+        url = await piapi_client.generate_image(prompt, ref_urls)
         done["n"] += 1
         if url:
             done["ok"] += 1
-            await _send_image(query.message, url, prompt, f"Размножение {idx}/3")
+            await _send_image(query.message, url, prompt, f"Размножение {idx}/3", ref_urls)
         else:
             await query.message.answer(f"Размножение {idx}: генерация не удалась.")
         try:
