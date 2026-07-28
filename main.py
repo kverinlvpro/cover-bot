@@ -26,6 +26,7 @@ bot = Bot(token=config.TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 _image_store: dict[str, dict] = {}
+_scale_data: dict[str, dict] = {}   # image_id -> {products, selected}
 
 
 class CoverForm(StatesGroup):
@@ -87,6 +88,12 @@ class UtpAddCallback(CallbackData, prefix="utpadd"):
 
 class ProductSelectCallback(CallbackData, prefix="psel"):
     idx: int
+
+
+class ScaleColorsCB(CallbackData, prefix="sc"):
+    action: str   # start | toggle | confirm | cancel
+    image_id: str
+    idx: int = -1
 
 
 # --- Keyboards ---
@@ -217,8 +224,8 @@ def _volume_unit_kb(volume: str) -> ReplyKeyboardMarkup:
     )
 
 
-def _image_kb(image_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _image_kb(image_id: str, has_line: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(
             text="🔁 Размножить идею",
             callback_data=MultiplyCallback(image_id=image_id).pack(),
@@ -227,7 +234,36 @@ def _image_kb(image_id: str) -> InlineKeyboardMarkup:
             text="✏️ Исправить фотографию",
             callback_data=FixCallback(image_id=image_id).pack(),
         )],
+    ]
+    if has_line:
+        rows.append([InlineKeyboardButton(
+            text="🎨 Цвета линейки (beta)",
+            callback_data=ScaleColorsCB(action="start", image_id=image_id).pack(),
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_scale_kb(image_id: str, products: list[dict], selected: set) -> InlineKeyboardMarkup:
+    rows = []
+    for i, p in enumerate(products):
+        mark = "☑️" if i in selected else "⬜"
+        name = p.get("color_name") or p.get("rgb", "?")
+        rows.append([InlineKeyboardButton(
+            text=f"{mark} {name}",
+            callback_data=ScaleColorsCB(action="toggle", image_id=image_id, idx=i).pack(),
+        )])
+    confirm_text = f"✅ Генерировать ({len(selected)} цв.)" if selected else "✅ Генерировать все"
+    rows.append([
+        InlineKeyboardButton(
+            text=confirm_text,
+            callback_data=ScaleColorsCB(action="confirm", image_id=image_id).pack(),
+        ),
+        InlineKeyboardButton(
+            text="❌ Отмена",
+            callback_data=ScaleColorsCB(action="cancel", image_id=image_id).pack(),
+        ),
     ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _build_utp_kb(utps: list[str], selected: set) -> InlineKeyboardMarkup:
@@ -951,6 +987,16 @@ def _detect_lacquer_finish(text: str) -> str:
     return ""
 
 
+def _swap_color_in_prompt(prompt: str, old_code: str, old_name: str, new_code: str, new_name: str) -> str:
+    result = prompt
+    if old_name:
+        new_name_str = f"«{new_name}»" if new_name else (f"RGB({new_code})" if new_code else "?")
+        result = result.replace(f"«{old_name}»", new_name_str)
+    if old_code and new_code:
+        result = result.replace(f"RGB({old_code})", f"RGB({new_code})")
+    return result
+
+
 def _build_request(data: dict) -> str:
     product = data["product_name"]
     volume = data["volume"]
@@ -1033,16 +1079,22 @@ async def _fresh_ref_urls(ref_file_ids: list[str]) -> list[str]:
 async def _send_image(
     target: Message, url: str, prompt: str, label: str,
     ref_file_ids: list[str] | None = None,
+    meta: dict | None = None,
 ):
     image_id = uuid.uuid4().hex[:10]
-    _image_store[image_id] = {"prompt": prompt, "url": url, "ref_file_ids": ref_file_ids or []}
+    _image_store[image_id] = {
+        "prompt": prompt, "url": url,
+        "ref_file_ids": ref_file_ids or [],
+        **(meta or {}),
+    }
+    has_line = bool(meta and meta.get("line"))
     caption = f"{label}\n\n<i>{prompt[:800]}</i>"
     try:
         await target.answer_photo(
             photo=url,
             caption=caption,
             parse_mode="HTML",
-            reply_markup=_image_kb(image_id),
+            reply_markup=_image_kb(image_id, has_line=has_line),
         )
     except Exception:
         await target.answer(f"{label}: фото готово, но не удалось отправить.")
@@ -1055,6 +1107,12 @@ async def run_pipeline(message: Message, data: dict):
     photo_ids: list[str] = data.get("photo_ids", [])
     color_photo_ids: list[str] = data.get("color_photo_ids", [])
     paint_type: str = data.get("paint_type", "furniture")
+    _pipe_meta = {
+        "line": data.get("line") or "",
+        "paint_type": paint_type,
+        "color_code": data.get("color_code") or "",
+        "color_name": data.get("color_name") or "",
+    }
 
     status = await message.answer("Генерирую промты через Claude…")
 
@@ -1118,7 +1176,7 @@ async def run_pipeline(message: Message, data: dict):
         if url:
             done["ok"] += 1
             try:
-                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_file_ids)
+                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_file_ids, meta=_pipe_meta)
             except Exception as e:
                 logging.error("_send_image idx=%d error: %s", idx, e)
         else:
@@ -1334,6 +1392,138 @@ async def run_fix_pipeline(
         await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
     else:
         await status.edit_text("Не удалось исправить изображение. Попробуйте ещё раз.")
+
+
+# --- Scale to line colors ---
+
+@dp.callback_query(ScaleColorsCB.filter(F.action == "start"))
+async def handle_scale_start(query: CallbackQuery, callback_data: ScaleColorsCB):
+    image_id = callback_data.image_id
+    meta = _image_store.get(image_id, {})
+    line = meta.get("line", "")
+    if not line:
+        await query.answer("Линейка не определена для этого товара", show_alert=True)
+        return
+
+    try:
+        products = await sheets_client.load_products()
+    except Exception:
+        await query.answer("Ошибка загрузки базы данных", show_alert=True)
+        return
+
+    current_code = meta.get("color_code", "")
+    seen_codes: set[str] = {current_code} if current_code else set()
+    same_line: list[dict] = []
+    for p in products:
+        if p.get("line") != line:
+            continue
+        code = p.get("rgb", "")
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
+        same_line.append(p)
+
+    if not same_line:
+        await query.answer("Других цветов в этой линейке не найдено в базе", show_alert=True)
+        return
+
+    _scale_data[image_id] = {"products": same_line, "selected": set()}
+    await query.answer()
+    await query.message.answer(
+        f"🎨 Линейка «{line}» — найдено {len(same_line)} других цвет(а/ов).\n"
+        "Отметьте нужные и нажмите «Генерировать»:",
+        reply_markup=_build_scale_kb(image_id, same_line, set()),
+    )
+
+
+@dp.callback_query(ScaleColorsCB.filter(F.action == "toggle"))
+async def handle_scale_toggle(query: CallbackQuery, callback_data: ScaleColorsCB):
+    image_id = callback_data.image_id
+    idx = callback_data.idx
+    sd = _scale_data.get(image_id)
+    if sd is None:
+        await query.answer("Сессия устарела — нажмите «Цвета линейки» снова", show_alert=True)
+        return
+    if idx in sd["selected"]:
+        sd["selected"].discard(idx)
+    else:
+        sd["selected"].add(idx)
+    await query.message.edit_reply_markup(
+        reply_markup=_build_scale_kb(image_id, sd["products"], sd["selected"])
+    )
+    await query.answer()
+
+
+@dp.callback_query(ScaleColorsCB.filter(F.action == "cancel"))
+async def handle_scale_cancel(query: CallbackQuery, callback_data: ScaleColorsCB):
+    _scale_data.pop(callback_data.image_id, None)
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await query.answer("Отменено")
+
+
+@dp.callback_query(ScaleColorsCB.filter(F.action == "confirm"))
+async def handle_scale_confirm(query: CallbackQuery, callback_data: ScaleColorsCB):
+    image_id = callback_data.image_id
+    sd = _scale_data.pop(image_id, None)
+    if sd is None:
+        await query.answer("Сессия устарела — нажмите «Цвета линейки» снова", show_alert=True)
+        return
+
+    selected_idxs = sd["selected"]
+    all_products = sd["products"]
+    target_products = [all_products[i] for i in sorted(selected_idxs)] if selected_idxs else all_products
+
+    meta = _image_store.get(image_id, {})
+    original_prompt = meta.get("prompt", "")
+    ref_file_ids = meta.get("ref_file_ids", [])
+    old_code = meta.get("color_code", "")
+    old_name = meta.get("color_name", "")
+    line = meta.get("line", "")
+    paint_type = meta.get("paint_type", "furniture")
+
+    try:
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await query.answer()
+
+    status = await query.message.answer(
+        f"🎨 Масштабирую на {len(target_products)} цвет(а)...\nЭто займёт несколько минут."
+    )
+
+    ref_urls = await _fresh_ref_urls(ref_file_ids)
+    done = {"n": 0, "ok": 0}
+
+    async def gen_color(product: dict):
+        new_code = product.get("rgb", "")
+        new_name = product.get("color_name", "")
+        new_prompt = _swap_color_in_prompt(original_prompt, old_code, old_name, new_code, new_name)
+        url = await piapi_client.generate_image(new_prompt, ref_urls or None)
+        done["n"] += 1
+        label_color = new_name or new_code or "?"
+        if url:
+            done["ok"] += 1
+            await _send_image(
+                query.message, url, new_prompt, f"🎨 {label_color}",
+                ref_file_ids,
+                meta={"line": line, "paint_type": paint_type, "color_code": new_code, "color_name": new_name},
+            )
+        else:
+            await query.message.answer(f"❌ Не удалось: {label_color}")
+        try:
+            await status.edit_text(f"🎨 Масштабирую... {done['n']}/{len(target_products)} готово")
+        except Exception:
+            pass
+
+    await asyncio.gather(*[gen_color(p) for p in target_products])
+
+    try:
+        await status.edit_text(f"✅ Готово! {done['ok']}/{len(target_products)} обложек сгенерировано.")
+    except Exception:
+        pass
 
 
 async def main():
