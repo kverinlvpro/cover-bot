@@ -1198,10 +1198,22 @@ async def run_pipeline(message: Message, data: dict):
         await status.edit_text(f"Готово! Сгенерировано {done['ok']}/10 обложек.")
     except Exception:
         pass
-    try:
-        await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
-    except Exception as e:
-        logging.error("AGAIN_KB send error: %s", e)
+
+    if done["ok"] == 0:
+        await message.answer(
+            "⚠️ Ни одно изображение не сгенерировалось.\n"
+            "Возможные причины:\n"
+            "• Недостаточно баланса на PiAPI\n"
+            "• Сервис PiAPI временно недоступен\n"
+            "• Неверный тип задачи (TASK_TYPE)\n\n"
+            "Проверьте логи Railway для деталей.",
+            reply_markup=AGAIN_KB,
+        )
+    else:
+        try:
+            await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
+        except Exception as e:
+            logging.error("AGAIN_KB send error: %s", e)
 
 
 # --- Multiply idea ---

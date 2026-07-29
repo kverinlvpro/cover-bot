@@ -31,12 +31,15 @@ async def _submit(prompt: str, image_urls: list[str] | None) -> str | None:
             r = await client.post(BASE_URL, json=payload, headers=_headers())
             data = r.json()
 
-        logger.info("PiAPI submit status=%s code=%s", r.status_code, data.get("code"))
-        if data.get("code") != 200:
-            logger.error("PiAPI submit error: %s", data)
+        code = data.get("code")
+        logger.info("PiAPI submit http=%s code=%s task_type=%s", r.status_code, code, config.TASK_TYPE)
+        if code != 200:
+            logger.error("PiAPI submit FULL response: %s", data)
             return None
 
-        return data["data"]["task_id"]
+        task_id = data["data"]["task_id"]
+        logger.info("PiAPI submit OK task_id=%s", task_id)
+        return task_id
     except Exception as e:
         logger.exception("PiAPI submit exception: %s", e)
         return None
@@ -44,8 +47,10 @@ async def _submit(prompt: str, image_urls: list[str] | None) -> str | None:
 
 async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | None:
     deadline = asyncio.get_event_loop().time() + timeout
+    checks = 0
     while asyncio.get_event_loop().time() < deadline:
         await asyncio.sleep(interval)
+        checks += 1
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 r = await client.get(f"{BASE_URL}/{task_id}", headers=_headers())
@@ -53,22 +58,24 @@ async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | No
 
             task = data.get("data", {})
             status = task.get("status", "")
-            logger.info("PiAPI poll task_id=%s status=%s", task_id, status)
+            logger.info("PiAPI poll #%d task_id=%s status=%s", checks, task_id, status)
 
             if status == "completed":
                 out = task.get("output", {})
                 urls = out.get("image_urls") or []
-                return urls[0] if urls else out.get("image_url")
+                url = urls[0] if urls else out.get("image_url")
+                logger.info("PiAPI completed task_id=%s url_ok=%s", task_id, bool(url))
+                return url
 
             if status in ("failed", "error", "cancelled"):
-                logger.error("PiAPI task failed: %s", task)
+                logger.error("PiAPI task FAILED task_id=%s full=%s", task_id, task)
                 return None
 
         except Exception as e:
-            logger.exception("PiAPI poll exception: %s", e)
+            logger.exception("PiAPI poll exception check=%d: %s", checks, e)
             continue
 
-    logger.error("PiAPI poll timeout for task_id=%s", task_id)
+    logger.error("PiAPI TIMEOUT after %ds task_id=%s checks=%d", timeout, task_id, checks)
     return None
 
 
@@ -79,6 +86,7 @@ _sem = asyncio.Semaphore(3)
 async def generate_image(prompt: str, image_urls: list[str] | None = None) -> str | None:
     async with _sem:
         for attempt in range(3):
+            logger.info("PiAPI generate attempt=%d image_urls_count=%d", attempt + 1, len(image_urls or []))
             task_id = await _submit(prompt, image_urls)
             if not task_id:
                 wait = (attempt + 1) * 5
@@ -93,5 +101,5 @@ async def generate_image(prompt: str, image_urls: list[str] | None = None) -> st
             logger.warning("PiAPI poll returned None attempt=%d task_id=%s", attempt + 1, task_id)
             await asyncio.sleep((attempt + 1) * 5)
 
-        logger.error("PiAPI all 3 attempts failed")
+        logger.error("PiAPI all 3 attempts failed for prompt=%.80s", prompt)
         return None
