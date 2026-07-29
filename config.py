@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TELEGRAM_TOKEN: str = os.environ["TELEGRAM_TOKEN"]
-CLAUDE_API_KEY: str = os.environ["CLAUDE_API_KEY"]
+OPENAI_API_KEY: str = os.environ["OPENAI_API_KEY"]
 PIAPI_KEY: str = os.environ["PIAPI_KEY"]
 
 ASPECT_RATIO: str = os.getenv("ASPECT_RATIO", "1:1")

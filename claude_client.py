@@ -1,9 +1,7 @@
 import re
-import json
 import base64
 import logging
-import httpx
-import anthropic
+from openai import AsyncOpenAI
 import config
 
 logger = logging.getLogger(__name__)
@@ -67,149 +65,14 @@ def _build_system_prompt(paint_type: str) -> str:
     return _SYSTEM_PROMPT_BASE.format(color_rule=rule)
 
 
-_CARD_ANALYSIS_PROMPT = (
-    "Проанализируй содержимое страницы товара с маркетплейса и верни ТОЛЬКО JSON без markdown:\n"
-    '{"name": "название товара", '
-    '"volume": "объём/вес/расход (2.5л, 5кг, 9м²/л) или null", '
-    '"paint_type": "furniture или walls", '
-    '"utps": ["УТП 1", "УТП 2", "УТП 3", "УТП 4", "УТП 5", "УТП 6"]}\n'
-    "paint_type: walls — краска для стен/потолка/фасада/интерьера; furniture — для мебели/дерева/металла.\n"
-    "volume: ищи в характеристиках (Объём, Вес, Расход), в скобках в названии, в описании.\n"
-    "utps — 6-10 коротких торговых преимуществ (3-5 слов каждое)."
-)
-
-_BROWSER_CONFIGS = [
-    {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Upgrade-Insecure-Requests": "1",
-    },
-    {
-        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Sec-CH-UA": '"Google Chrome";v="125", "Chromium";v="125", "Not-A.Brand";v="99"',
-        "Sec-CH-UA-Mobile": "?1",
-        "Sec-CH-UA-Platform": '"Android"',
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-    },
-    {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "none",
-        "Sec-Fetch-User": "?1",
-        "Sec-CH-UA": '"Google Chrome";v="125", "Chromium";v="125", "Not-A.Brand";v="99"',
-        "Sec-CH-UA-Mobile": "?0",
-        "Sec-CH-UA-Platform": '"Windows"',
-        "Upgrade-Insecure-Requests": "1",
-    },
-]
-
-
-def _extract_page_content(html: str) -> str:
-    jsonld = re.findall(
-        r'<script[^>]*type=["\']application/ld\+json["\'][^>]*>([\s\S]*?)</script>',
-        html, re.IGNORECASE,
-    )
-    jsonld_text = "\n".join(jsonld[:3])[:3000]
-    text = re.sub(r'<script[^>]*>[\s\S]*?</script>', '', html, flags=re.IGNORECASE)
-    text = re.sub(r'<style[^>]*>[\s\S]*?</style>', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'<[^>]+>', ' ', text)
-    text = re.sub(r'\s+', ' ', text).strip()
-    prefix = f"STRUCTURED DATA:\n{jsonld_text}\n\nPAGE TEXT:\n" if jsonld_text else ""
-    return prefix + text[:20000]
-
-
-_TIMEOUT = httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0)
-_WARMUP_TIMEOUT = httpx.Timeout(connect=4.0, read=6.0, write=4.0, pool=4.0)
-
-
-async def _fetch_page(url: str) -> str:
-    from urllib.parse import urlparse
-    parsed = urlparse(url)
-    base_url = f"{parsed.scheme}://{parsed.netloc}/"
-
-    for cfg in _BROWSER_CONFIGS:
-        try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=_TIMEOUT) as http:
-                try:
-                    await http.get(base_url, headers=cfg, timeout=_WARMUP_TIMEOUT)
-                except Exception:
-                    pass
-                r = await http.get(url, headers={**cfg, "Referer": base_url})
-                logger.info("_fetch_page status=%d ua=%s", r.status_code, cfg["User-Agent"][:40])
-                if r.status_code == 200 and len(r.text) > 500:
-                    return _extract_page_content(r.text)
-        except Exception as e:
-            logger.warning("_fetch_page exception: %s", e)
-    return ""
-
-
-async def analyze_card(url: str) -> dict:
-    page_content = await _fetch_page(url)
-
-    if not page_content:
-        raise ValueError(
-            "Страница недоступна — маркетплейс заблокировал запрос.\n"
-            "Попробуйте другую ссылку или используйте режим «Гибкая настройка»."
-        )
-
-    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
-    prompt = f"URL: {url}\n\nСОДЕРЖИМОЕ СТРАНИЦЫ:\n{page_content}\n\n{_CARD_ANALYSIS_PROMPT}"
-
-    try:
-        response = await client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=2048,
-            messages=[{"role": "user", "content": prompt}],
-        )
-    except Exception as e:
-        raise ValueError(f"Ошибка Claude API: {e}")
-
-    text = next((b.text for b in response.content if hasattr(b, "text")), "")
-    logger.info("analyze_card response: %s", text[:400])
-
-    if "{" in text:
-        clean = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', ' ', text)
-        s = clean.find("{")
-        e = clean.rfind("}") + 1
-        if s >= 0 and e > s:
-            try:
-                result = json.loads(clean[s:e])
-                if "name" in result and "utps" in result:
-                    if "paint_type" not in result:
-                        result["paint_type"] = "furniture"
-                    return result
-            except json.JSONDecodeError:
-                pass
-
-    raise ValueError(f"Не удалось извлечь JSON из ответа Claude:\n{text[:300]}")
+def _img_content(image_bytes: bytes) -> dict:
+    b64 = base64.standard_b64encode(image_bytes).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}}
 
 
 async def analyze_color_samples(color_image_bytes: list[bytes]) -> str:
-    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
-    content: list = []
-    for cb in color_image_bytes[:4]:
-        b64 = base64.standard_b64encode(cb).decode()
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-        })
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+    content: list = [_img_content(cb) for cb in color_image_bytes[:4]]
     content.append({
         "type": "text",
         "text": (
@@ -222,12 +85,12 @@ async def analyze_color_samples(color_image_bytes: list[bytes]) -> str:
             "почти белый, очень светлый, матовый, warm white.»"
         ),
     })
-    response = await client.messages.create(
-        model="claude-sonnet-5",
+    response = await client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=200,
         messages=[{"role": "user", "content": content}],
     )
-    return next(b.text for b in response.content if hasattr(b, "text")).strip()
+    return response.choices[0].message.content.strip()
 
 
 async def generate_prompts(
@@ -236,38 +99,33 @@ async def generate_prompts(
     color_image_bytes: list[bytes] | None = None,
     paint_type: str = "furniture",
 ) -> list[str]:
-    client = anthropic.AsyncAnthropic(api_key=config.CLAUDE_API_KEY)
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
     system = _build_system_prompt(paint_type)
 
     content: list = []
 
     if image_bytes:
-        b64 = base64.standard_b64encode(image_bytes).decode()
-        content.append({
-            "type": "image",
-            "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-        })
+        content.append(_img_content(image_bytes))
         content.append({"type": "text", "text": "Референсное фото упаковки товара выше."})
 
     if paint_type == "walls" and color_image_bytes:
-        for i, cb in enumerate(color_image_bytes[:4]):
-            b64 = base64.standard_b64encode(cb).decode()
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": "image/jpeg", "data": b64},
-            })
+        for cb in color_image_bytes[:4]:
+            content.append(_img_content(cb))
         content.append({"type": "text", "text": "Образцы цвета и живые фото краски выше."})
 
     content.append({"type": "text", "text": user_request})
 
-    response = await client.messages.create(
-        model="claude-sonnet-5",
+    response = await client.chat.completions.create(
+        model="gpt-4o",
         max_tokens=4096,
-        system=system,
-        messages=[{"role": "user", "content": content}]
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": content},
+        ],
     )
 
-    raw = next(block.text for block in response.content if hasattr(block, "text")).strip()
+    raw = response.choices[0].message.content.strip()
+    logger.info("GPT generate_prompts response: %s", raw[:300])
 
     prompts = []
     for line in raw.splitlines():
@@ -277,6 +135,6 @@ async def generate_prompts(
             prompts.append(m.group(1).strip())
 
     if len(prompts) < 4:
-        raise ValueError(f"Claude вернул только {len(prompts)} промтов из 10. Ответ: {raw[:300]}")
+        raise ValueError(f"GPT вернул только {len(prompts)} промтов из 10. Ответ: {raw[:300]}")
 
     return prompts[:10]
