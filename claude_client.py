@@ -104,9 +104,8 @@ async def generate_prompts(
 
     content: list = []
 
-    if image_bytes:
-        content.append(_img_content(image_bytes))
-        content.append({"type": "text", "text": "Референсное фото упаковки товара выше."})
+    # Фото упаковки НЕ передаём — GPT отказывается работать с брендированными изображениями.
+    # Вся информация о товаре уже есть в текстовом запросе; фото нужно только PiAPI.
 
     if paint_type == "walls" and color_image_bytes:
         for cb in color_image_bytes[:4]:
