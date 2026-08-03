@@ -82,7 +82,8 @@ class BannerForm(StatesGroup):
     product_search = State()        # поиск товара в базе
     render_photo = State()          # рендер банки краски
     design_request = State()        # дизайнерский запрос (что показать)
-    text_content = State()          # что написать на баннере
+    headline = State()              # большой заголовок
+    subtitle = State()              # мелкий подзаголовок
     post_gen = State()              # после генерации
     new_design_request = State()    # изменить дизайнерский запрос
 
@@ -548,13 +549,21 @@ async def handle_back(message: Message, state: FSMContext):
         )
         await state.set_state(BannerForm.render_photo)
 
-    elif current == BannerForm.text_content.state:
+    elif current == BannerForm.headline.state:
         await message.answer(
             "Что нужно <b>показать</b> на баннере?",
             parse_mode="HTML",
             reply_markup=BACK_RESTART_KB,
         )
         await state.set_state(BannerForm.design_request)
+
+    elif current == BannerForm.subtitle.state:
+        await message.answer(
+            "Введите <b>большой заголовок</b> баннера:",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(BannerForm.headline)
 
     elif current == BannerForm.new_design_request.state:
         await message.answer("Что дальше?", reply_markup=BANNER_POST_GEN_KB)
@@ -2004,7 +2013,8 @@ def _build_banner_request(data: dict) -> str:
     color_name = data.get("color_name", "")
     color_code = data.get("color_code", "")
     design_req = data.get("banner_design_request", "")
-    text_content = data.get("banner_text_content", "")
+    headline = data.get("banner_headline", "")
+    subtitle = data.get("banner_subtitle", "")
 
     paint_labels = {
         "walls": "краска для стен", "lacquer": "лак для мебели",
@@ -2025,7 +2035,8 @@ def _build_banner_request(data: dict) -> str:
         f"КРИТИЧЕСКИ ВАЖНО: банку бери СТРОГО с предоставленного рендера ТОЧЬ-В-ТОЧЬ — "
         f"форма, этикетка, цвет, пропорции без изменений. "
         f"Что показать на баннере: {design_req}. "
-        f"Текст на баннере (крупный, 2–4 слова): {text_content}."
+        f'Большой заголовок (огромный жирный текст): «{headline}». '
+        f'Мелкий подзаголовок (небольшой текст под заголовком): «{subtitle}».'
     )
 
 
@@ -2159,17 +2170,29 @@ async def banner_render_bad(message: Message):
 async def banner_design_request(message: Message, state: FSMContext):
     await state.update_data(banner_design_request=message.text.strip())
     await message.answer(
-        "Что нужно <b>написать</b> на баннере?\n"
-        "<i>2–4 крупных слова: например «Матовая краска», «Та самая краска», «Купить»</i>",
+        "Введите <b>большой заголовок</b> баннера:\n"
+        "<i>Пример: «Матовая краска», «Та самая краска»</i>",
         parse_mode="HTML",
         reply_markup=BACK_RESTART_KB,
     )
-    await state.set_state(BannerForm.text_content)
+    await state.set_state(BannerForm.headline)
 
 
-@dp.message(BannerForm.text_content, F.text)
-async def banner_text_content(message: Message, state: FSMContext):
-    await state.update_data(banner_text_content=message.text.strip())
+@dp.message(BannerForm.headline, F.text)
+async def banner_headline(message: Message, state: FSMContext):
+    await state.update_data(banner_headline=message.text.strip())
+    await message.answer(
+        "Введите <b>мелкий подзаголовок</b> баннера:\n"
+        "<i>Пример: «Для мебели и декора», «Премиальная матовая краска»</i>",
+        parse_mode="HTML",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.subtitle)
+
+
+@dp.message(BannerForm.subtitle, F.text)
+async def banner_subtitle(message: Message, state: FSMContext):
+    await state.update_data(banner_subtitle=message.text.strip())
     data = await state.get_data()
     await state.clear()
     await message.answer("Принято! Генерирую баннеры…", reply_markup=ReplyKeyboardRemove())
