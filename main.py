@@ -2222,6 +2222,14 @@ async def banner_new_design_request(message: Message, state: FSMContext):
     await run_banner_pipeline(message, state, data)
 
 
+# Catch-all: если состояние сброшено (редеплой) — отправляем в начало
+@dp.message()
+async def catch_all(message: Message, state: FSMContext):
+    current = await state.get_state()
+    if current is None:
+        await _start_form(message, state)
+
+
 async def main():
     logging.info("Бот запущен")
     await dp.start_polling(bot)
