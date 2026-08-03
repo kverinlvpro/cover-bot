@@ -78,6 +78,15 @@ class SlideForm(StatesGroup):
     new_design_request = State()    # изменить дизайнерский запрос
 
 
+class BannerForm(StatesGroup):
+    product_search = State()        # поиск товара в базе
+    render_photo = State()          # рендер банки краски
+    design_request = State()        # дизайнерский запрос (что показать)
+    text_content = State()          # что написать на баннере
+    post_gen = State()              # после генерации
+    new_design_request = State()    # изменить дизайнерский запрос
+
+
 class MultiplyCallback(CallbackData, prefix="mul"):
     image_id: str
 
@@ -103,6 +112,10 @@ class ProductSelectCallback(CallbackData, prefix="psel"):
 
 
 class SlideProductSelectCallback(CallbackData, prefix="spsel"):
+    idx: int
+
+
+class BannerProductSelectCallback(CallbackData, prefix="bpsel"):
     idx: int
 
 
@@ -134,6 +147,7 @@ PRODUCT_TYPE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🖼 Обложка для маркетплейса")],
         [KeyboardButton(text="📑 Внутренние слайды")],
+        [KeyboardButton(text="🎯 Создать баннер")],
     ],
     resize_keyboard=True,
 )
@@ -156,6 +170,16 @@ SLIDE_POST_GEN_KB = ReplyKeyboardMarkup(
     ],
     resize_keyboard=True,
 )
+
+BANNER_POST_GEN_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔄 Ещё такие же баннеры")],
+        [KeyboardButton(text="✏️ Изменить дизайнерский запрос")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
 BACK_SKIP_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Пропустить")],
@@ -504,6 +528,38 @@ async def handle_back(message: Message, state: FSMContext):
         await message.answer("Что дальше?", reply_markup=SLIDE_POST_GEN_KB)
         await state.set_state(SlideForm.post_gen)
 
+    # Banner flow
+    elif current == BannerForm.product_search.state:
+        await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
+        await state.set_state(CoverForm.content_type_select)
+
+    elif current == BannerForm.render_photo.state:
+        await message.answer(
+            "Введите название товара или линейки для поиска в базе:",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(BannerForm.product_search)
+
+    elif current == BannerForm.design_request.state:
+        await message.answer(
+            "Отправьте <b>рендер банки краски</b>:",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(BannerForm.render_photo)
+
+    elif current == BannerForm.text_content.state:
+        await message.answer(
+            "Что нужно <b>показать</b> на баннере?",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(BannerForm.design_request)
+
+    elif current == BannerForm.new_design_request.state:
+        await message.answer("Что дальше?", reply_markup=BANNER_POST_GEN_KB)
+        await state.set_state(BannerForm.post_gen)
+
     else:
         await message.answer("На этом шаге вернуться назад нельзя.", reply_markup=RESTART_KB)
 
@@ -537,6 +593,15 @@ async def product_type_slides(message: Message, state: FSMContext):
         reply_markup=SLIDE_TYPE_KB,
     )
     await state.set_state(SlideForm.type_select)
+
+
+@dp.message(CoverForm.content_type_select, F.text == "🎯 Создать баннер")
+async def product_type_banner(message: Message, state: FSMContext):
+    await message.answer(
+        "Введите название товара или линейки для поиска в базе:",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.product_search)
 
 
 @dp.message(CommandStart())
@@ -1917,6 +1982,221 @@ async def slide_new_design_request(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Генерирую с новым запросом…", reply_markup=ReplyKeyboardRemove())
     await run_slide_pipeline(message, state, data)
+
+
+# =====================================================================
+# === БАННЕРЫ ===
+# =====================================================================
+
+def _build_banner_search_kb(results: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for i, p in enumerate(results):
+        rows.append([InlineKeyboardButton(
+            text=_product_btn_text(p),
+            callback_data=BannerProductSelectCallback(idx=i).pack(),
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _build_banner_request(data: dict) -> str:
+    product = data.get("product_name", "")
+    paint_type = data.get("paint_type", "furniture")
+    color_name = data.get("color_name", "")
+    color_code = data.get("color_code", "")
+    design_req = data.get("banner_design_request", "")
+    text_content = data.get("banner_text_content", "")
+
+    paint_labels = {
+        "walls": "краска для стен", "lacquer": "лак для мебели",
+        "primer": "грунтовка для мебели", "furniture": "краска для мебели",
+    }
+    paint_label = paint_labels.get(paint_type, paint_type)
+
+    color_part = ""
+    if color_name:
+        rgb_hint = f" (точный RGB: {color_code})" if color_code else ""
+        color_part = f"Цвет: «{color_name}»{rgb_hint}. "
+    elif color_code:
+        color_part = f"Цвет: RGB({color_code}). "
+
+    return (
+        f'Создай 3 уникальных промта для рекламного баннера товара "{product}" ({paint_label}). '
+        f"{color_part}"
+        f"КРИТИЧЕСКИ ВАЖНО: банку бери СТРОГО с предоставленного рендера ТОЧЬ-В-ТОЧЬ — "
+        f"форма, этикетка, цвет, пропорции без изменений. "
+        f"Что показать на баннере: {design_req}. "
+        f"Текст на баннере (крупный, 2–4 слова): {text_content}."
+    )
+
+
+async def run_banner_pipeline(message: Message, state: FSMContext, data: dict):
+    user_request = _build_banner_request(data)
+    status = await message.answer("Генерирую промты для баннеров…")
+
+    try:
+        prompts = await claude_client.generate_banner_prompts(user_request)
+    except Exception as e:
+        await status.edit_text(f"Ошибка генерации промтов: {e}")
+        await message.answer("Попробуйте ещё раз:", reply_markup=BANNER_POST_GEN_KB)
+        return
+
+    await status.edit_text(f"{len(prompts)} промта готово! Отправляю в Nano Banana Pro…")
+
+    render_fid = data.get("banner_render_fid")
+    ref_urls = await _fresh_ref_urls([render_fid]) if render_fid else []
+
+    done = {"n": 0, "ok": 0}
+
+    async def gen_banner(idx: int, prompt: str):
+        url = await piapi_client.generate_image(prompt, ref_urls or None, aspect_ratio="16:9")
+        done["n"] += 1
+        if url:
+            done["ok"] += 1
+            await _send_image(message, url, prompt, f"Баннер {idx}/{len(prompts)}", [render_fid] if render_fid else [])
+        else:
+            await message.answer(f"Баннер {idx}: генерация не удалась.")
+        try:
+            await status.edit_text(f"Обработано {done['n']}/{len(prompts)} | Готово: {done['ok']}")
+        except Exception:
+            pass
+
+    await asyncio.gather(*[gen_banner(i + 1, p) for i, p in enumerate(prompts)])
+
+    try:
+        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/{len(prompts)} баннеров.")
+    except Exception:
+        pass
+
+    await state.update_data(**data)
+    await state.set_state(BannerForm.post_gen)
+
+    if done["ok"] == 0:
+        await message.answer(
+            "⚠️ Ни один баннер не сгенерировался. Проверьте баланс PiAPI.",
+            reply_markup=BANNER_POST_GEN_KB,
+        )
+    else:
+        await message.answer("Что дальше?", reply_markup=BANNER_POST_GEN_KB)
+
+
+@dp.message(BannerForm.product_search, F.text)
+async def banner_product_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    status = await message.answer("🔍 Ищу в базе…")
+    try:
+        products = await sheets_client.load_products()
+    except Exception as e:
+        await status.edit_text(f"❌ Не удалось загрузить базу: {e}")
+        return
+    results = sheets_client.search_products(query, products)
+    if not results:
+        await status.edit_text(f"Ничего не найдено по «{query}». Попробуйте другой запрос.")
+        return
+    if len(results) > 10:
+        await status.edit_text(
+            f"Найдено {len(results)} позиций — слишком много. Уточните запрос."
+        )
+        return
+    await state.update_data(banner_search_results=results)
+    await status.edit_text(
+        f"Найдено {len(results)} позиций. Выберите товар:",
+        reply_markup=_build_banner_search_kb(results),
+    )
+
+
+@dp.callback_query(BannerProductSelectCallback.filter(), BannerForm.product_search)
+async def banner_product_select(
+    query: CallbackQuery,
+    callback_data: BannerProductSelectCallback,
+    state: FSMContext,
+):
+    await query.answer()
+    data = await state.get_data()
+    results: list[dict] = data.get("banner_search_results", [])
+    idx = callback_data.idx
+    if idx >= len(results):
+        await query.message.answer("Ошибка выбора, попробуйте снова.", reply_markup=BACK_RESTART_KB)
+        return
+    product = results[idx]
+    await state.update_data(
+        product_name=product["name"],
+        paint_type=product["paint_type"],
+        color_code=product["rgb"] if product["rgb"] else None,
+        color_name=product["color_name"],
+        line=product["line"],
+    )
+    color_info = f"\n<b>Цвет:</b> {product['color_name']}" if product["color_name"] else ""
+    await query.message.answer(
+        f"✅ <b>{product['name']}</b>{color_info}",
+        parse_mode="HTML",
+    )
+    await query.message.answer(
+        "Отправьте <b>рендер банки краски</b> — чистое изображение упаковки:",
+        parse_mode="HTML",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.render_photo)
+
+
+@dp.message(BannerForm.render_photo, F.photo)
+async def banner_render_photo(message: Message, state: FSMContext):
+    await state.update_data(banner_render_fid=message.photo[-1].file_id)
+    await message.answer(
+        "Что нужно <b>показать</b> на баннере?\n"
+        "<i>Пример: банка на фоне выкраски, рука с кистью, покрашенная поверхность, lifestyle</i>",
+        parse_mode="HTML",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.design_request)
+
+
+@dp.message(BannerForm.render_photo)
+async def banner_render_bad(message: Message):
+    await message.answer("Отправьте фото рендера банки:", reply_markup=BACK_RESTART_KB)
+
+
+@dp.message(BannerForm.design_request, F.text)
+async def banner_design_request(message: Message, state: FSMContext):
+    await state.update_data(banner_design_request=message.text.strip())
+    await message.answer(
+        "Что нужно <b>написать</b> на баннере?\n"
+        "<i>2–4 крупных слова: например «Матовая краска», «Та самая краска», «Купить»</i>",
+        parse_mode="HTML",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.text_content)
+
+
+@dp.message(BannerForm.text_content, F.text)
+async def banner_text_content(message: Message, state: FSMContext):
+    await state.update_data(banner_text_content=message.text.strip())
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Принято! Генерирую баннеры…", reply_markup=ReplyKeyboardRemove())
+    await run_banner_pipeline(message, state, data)
+
+
+@dp.message(BannerForm.post_gen, F.text == "🔄 Ещё такие же баннеры")
+async def banner_post_again(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Генерирую ещё раз…", reply_markup=ReplyKeyboardRemove())
+    await run_banner_pipeline(message, state, data)
+
+
+@dp.message(BannerForm.post_gen, F.text == "✏️ Изменить дизайнерский запрос")
+async def banner_post_change_design(message: Message, state: FSMContext):
+    await message.answer("Введите новый дизайнерский запрос:", reply_markup=BACK_RESTART_KB)
+    await state.set_state(BannerForm.new_design_request)
+
+
+@dp.message(BannerForm.new_design_request, F.text)
+async def banner_new_design_request(message: Message, state: FSMContext):
+    await state.update_data(banner_design_request=message.text.strip())
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Генерирую с новым запросом…", reply_markup=ReplyKeyboardRemove())
+    await run_banner_pipeline(message, state, data)
 
 
 async def main():

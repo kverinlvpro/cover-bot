@@ -12,14 +12,14 @@ def _headers() -> dict:
     return {"X-API-Key": config.PIAPI_KEY, "Content-Type": "application/json"}
 
 
-async def _submit(prompt: str, image_urls: list[str] | None) -> str | None:
+async def _submit(prompt: str, image_urls: list[str] | None, aspect_ratio: str | None = None) -> str | None:
     payload: dict = {
         "model": "gemini",
         "task_type": config.TASK_TYPE,
         "input": {
             "prompt": prompt,
             "output_format": "jpg",
-            "aspect_ratio": config.ASPECT_RATIO,
+            "aspect_ratio": aspect_ratio or config.ASPECT_RATIO,
             "resolution": config.RESOLUTION,
         }
     }
@@ -83,11 +83,11 @@ async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | No
 _sem = asyncio.Semaphore(3)
 
 
-async def generate_image(prompt: str, image_urls: list[str] | None = None) -> str | None:
+async def generate_image(prompt: str, image_urls: list[str] | None = None, aspect_ratio: str | None = None) -> str | None:
     async with _sem:
         for attempt in range(3):
             logger.info("PiAPI generate attempt=%d image_urls_count=%d", attempt + 1, len(image_urls or []))
-            task_id = await _submit(prompt, image_urls)
+            task_id = await _submit(prompt, image_urls, aspect_ratio)
             if not task_id:
                 wait = (attempt + 1) * 5
                 logger.warning("PiAPI submit failed attempt=%d, retry in %ds", attempt + 1, wait)

@@ -158,6 +158,53 @@ _SLIDE_SYSTEM_PROMPT = """Ты — профессиональный дизайн
 3. промт три"""
 
 
+_BANNER_SYSTEM_PROMPT = """Ты — профессиональный дизайнер рекламных баннеров для маркетплейсов и соцсетей.
+
+Задача: по запросу пользователя сгенерировать ровно 3 уникальных промта для нейросети Nano Banana Pro (Google Gemini image generator).
+
+Правила:
+1. Каждый промт — на РУССКОМ языке
+2. Каждый промт описывает УНИКАЛЬНУЮ концепцию баннера: разный фон, ракурс, настроение, цветовая палитра
+3. КРИТИЧЕСКИ ВАЖНО: упаковка товара (банка/тара) копируется СТРОГО С ПРЕДОСТАВЛЕННОГО РЕНДЕРА ТОЧЬ-В-ТОЧЬ — форма, этикетка, цвет, пропорции БЕЗ КАКИХ-ЛИБО ИЗМЕНЕНИЙ. В каждом промте пиши: "банка скопирована точно с рендера без изменений"
+4. ОБЯЗАТЕЛЬНО МИНИМАЛИЗМ: на баннере НЕТ мелкого текста, НЕТ мелких значков, НЕТ плашек со спецификациями. Только 2–4 крупных жирных слова и один главный объект
+5. Композиция воздушная и чистая: товар + простой однотонный или атмосферный фон. Никаких нагромождений
+6. Текст на баннере описывай как: огромный жирный текст "СЛОВО/ФРАЗА" — строго только то, что задал пользователь
+7. Каждый промт заканчивай на: "Горизонтальный формат 16:9, чистая минималистичная коммерческая реклама без мелких деталей и надписей"
+
+Верни ровно 3 промта в виде нумерованного списка — без JSON, без markdown, без пояснений:
+1. промт один
+2. промт два
+3. промт три"""
+
+
+async def generate_banner_prompts(user_request: str) -> list[str]:
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": _BANNER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_request},
+        ],
+    )
+
+    raw = response.choices[0].message.content.strip()
+    logger.info("GPT generate_banner_prompts response: %s", raw[:300])
+
+    prompts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        m = re.match(r'^\d{1,2}[.)]\s+(.+)$', line)
+        if m:
+            prompts.append(m.group(1).strip())
+
+    if len(prompts) < 1:
+        raise ValueError(f"GPT вернул только {len(prompts)} промтов из 3. Ответ: {raw[:300]}")
+
+    return prompts[:3]
+
+
 async def generate_slide_prompts(
     user_request: str,
     paint_type: str = "furniture",
