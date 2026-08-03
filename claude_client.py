@@ -158,7 +158,7 @@ _SLIDE_SYSTEM_PROMPT = """Ты — профессиональный дизайн
 3. промт три"""
 
 
-_BANNER_SYSTEM_PROMPT = """Ты — профессиональный дизайнер рекламных баннеров для маркетплейсов и соцсетей.
+_BANNER_SYSTEM_PROMPT_TPL = """Ты — профессиональный дизайнер рекламных баннеров для маркетплейсов и соцсетей.
 
 Задача: по запросу пользователя сгенерировать ровно 3 уникальных промта для нейросети Nano Banana Pro (Google Gemini image generator).
 
@@ -169,7 +169,7 @@ _BANNER_SYSTEM_PROMPT = """Ты — профессиональный дизай�
 4. ОБЯЗАТЕЛЬНО МИНИМАЛИЗМ: на баннере НЕТ мелкого текста, НЕТ мелких значков, НЕТ плашек со спецификациями. Только 2–4 крупных жирных слова и один главный объект
 5. Композиция воздушная и чистая: товар + простой однотонный или атмосферный фон. Никаких нагромождений
 6. Текст на баннере описывай как: огромный жирный текст "СЛОВО/ФРАЗА" — строго только то, что задал пользователь
-7. Каждый промт заканчивай на: "Горизонтальный формат 16:9, современный UX/UI дизайн, чистая минималистичная коммерческая реклама без мелких деталей и надписей"
+7. Каждый промт заканчивай на: "{format_line}, современный UX/UI дизайн, чистая минималистичная коммерческая реклама без мелких деталей и надписей"
 
 Верни ровно 3 промта в виде нумерованного списка — без JSON, без markdown, без пояснений:
 1. промт один
@@ -177,14 +177,16 @@ _BANNER_SYSTEM_PROMPT = """Ты — профессиональный дизай�
 3. промт три"""
 
 
-async def generate_banner_prompts(user_request: str) -> list[str]:
+async def generate_banner_prompts(user_request: str, aspect_ratio: str = "16:9") -> list[str]:
+    format_line = "Вертикальный формат 9:16" if aspect_ratio == "9:16" else "Горизонтальный формат 16:9"
+    system = _BANNER_SYSTEM_PROMPT_TPL.format(format_line=format_line)
     client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
     response = await client.chat.completions.create(
         model="gpt-4o",
         max_tokens=2048,
         messages=[
-            {"role": "system", "content": _BANNER_SYSTEM_PROMPT},
+            {"role": "system", "content": system},
             {"role": "user", "content": user_request},
         ],
     )

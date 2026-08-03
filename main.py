@@ -1,8 +1,11 @@
 import asyncio
+import io
 import logging
 import re
 import uuid
 
+import httpx
+from PIL import Image
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
 from aiogram.filters.callback_data import CallbackData
@@ -10,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    Message, CallbackQuery,
+    Message, CallbackQuery, BufferedInputFile,
     ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton,
 )
@@ -79,6 +82,7 @@ class SlideForm(StatesGroup):
 
 
 class BannerForm(StatesGroup):
+    format_select = State()         # выбор формата: вертикальный / горизонтальный
     product_search = State()        # поиск товара в базе
     render_photo = State()          # рендер банки краски
     design_request = State()        # дизайнерский запрос (что показать)
@@ -126,6 +130,10 @@ class ScaleColorsCB(CallbackData, prefix="sc"):
     idx: int = -1
 
 
+class CropCallback(CallbackData, prefix="crop"):
+    image_id: str
+
+
 # --- Keyboards ---
 
 def _kb(*labels: str) -> ReplyKeyboardMarkup:
@@ -167,6 +175,16 @@ SLIDE_POST_GEN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔄 Ещё такие же")],
         [KeyboardButton(text="✏️ Изменить дизайнерский запрос")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+BANNER_FORMAT_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📱 Вертикальный (9:16)")],
+        [KeyboardButton(text="🖥 Горизонтальный (16:9)")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -292,7 +310,7 @@ def _volume_unit_kb(volume: str) -> ReplyKeyboardMarkup:
     )
 
 
-def _image_kb(image_id: str, has_line: bool = False) -> InlineKeyboardMarkup:
+def _image_kb(image_id: str, has_line: bool = False, has_crop: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(
             text="🔁 Размножить идею",
@@ -307,6 +325,11 @@ def _image_kb(image_id: str, has_line: bool = False) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(
             text="🎨 Цвета линейки (beta)",
             callback_data=ScaleColorsCB(action="start", image_id=image_id).pack(),
+        )])
+    if has_crop:
+        rows.append([InlineKeyboardButton(
+            text="✂️ Обрезать",
+            callback_data=CropCallback(image_id=image_id).pack(),
         )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -530,9 +553,13 @@ async def handle_back(message: Message, state: FSMContext):
         await state.set_state(SlideForm.post_gen)
 
     # Banner flow
-    elif current == BannerForm.product_search.state:
+    elif current == BannerForm.format_select.state:
         await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
         await state.set_state(CoverForm.content_type_select)
+
+    elif current == BannerForm.product_search.state:
+        await message.answer("Выберите формат баннера:", reply_markup=BANNER_FORMAT_KB)
+        await state.set_state(BannerForm.format_select)
 
     elif current == BannerForm.render_photo.state:
         await message.answer(
@@ -606,11 +633,33 @@ async def product_type_slides(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.content_type_select, F.text == "🎯 Создать баннер")
 async def product_type_banner(message: Message, state: FSMContext):
+    await message.answer("Выберите формат баннера:", reply_markup=BANNER_FORMAT_KB)
+    await state.set_state(BannerForm.format_select)
+
+
+@dp.message(BannerForm.format_select, F.text == "📱 Вертикальный (9:16)")
+async def banner_format_vertical(message: Message, state: FSMContext):
+    await state.update_data(banner_aspect_ratio="9:16", banner_crop_w=940, banner_crop_h=1524)
     await message.answer(
         "Введите название товара или линейки для поиска в базе:",
         reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(BannerForm.product_search)
+
+
+@dp.message(BannerForm.format_select, F.text == "🖥 Горизонтальный (16:9)")
+async def banner_format_horizontal(message: Message, state: FSMContext):
+    await state.update_data(banner_aspect_ratio="16:9", banner_crop_w=1080, banner_crop_h=450)
+    await message.answer(
+        "Введите название товара или линейки для поиска в базе:",
+        reply_markup=BACK_RESTART_KB,
+    )
+    await state.set_state(BannerForm.product_search)
+
+
+@dp.message(BannerForm.format_select)
+async def banner_format_bad(message: Message):
+    await message.answer("Выберите формат с помощью кнопок:", reply_markup=BANNER_FORMAT_KB)
 
 
 @dp.message(CommandStart())
@@ -1300,13 +1349,18 @@ async def _send_image(
     target: Message, url: str, prompt: str, label: str,
     ref_file_ids: list[str] | None = None,
     meta: dict | None = None,
+    crop_size: tuple[int, int] | None = None,
 ):
     image_id = uuid.uuid4().hex[:10]
-    _image_store[image_id] = {
+    entry: dict = {
         "prompt": prompt, "url": url,
         "ref_file_ids": ref_file_ids or [],
         **(meta or {}),
     }
+    if crop_size:
+        entry["crop_w"] = crop_size[0]
+        entry["crop_h"] = crop_size[1]
+    _image_store[image_id] = entry
     has_line = bool(meta and meta.get("line"))
     caption = f"{label}\n\n<i>{prompt[:800]}</i>"
     try:
@@ -1314,7 +1368,7 @@ async def _send_image(
             photo=url,
             caption=caption,
             parse_mode="HTML",
-            reply_markup=_image_kb(image_id, has_line=has_line),
+            reply_markup=_image_kb(image_id, has_line=has_line, has_crop=bool(crop_size)),
         )
     except Exception:
         await target.answer(f"{label}: фото готово, но не удалось отправить.")
@@ -2044,8 +2098,13 @@ async def run_banner_pipeline(message: Message, state: FSMContext, data: dict):
     user_request = _build_banner_request(data)
     status = await message.answer("Генерирую промты для баннеров…")
 
+    banner_ar = data.get("banner_aspect_ratio", "16:9")
+    crop_w = data.get("banner_crop_w", 1080)
+    crop_h = data.get("banner_crop_h", 450)
+    crop_size = (crop_w, crop_h)
+
     try:
-        prompts = await claude_client.generate_banner_prompts(user_request)
+        prompts = await claude_client.generate_banner_prompts(user_request, banner_ar)
     except Exception as e:
         await status.edit_text(f"Ошибка генерации промтов: {e}")
         await message.answer("Попробуйте ещё раз:", reply_markup=BANNER_POST_GEN_KB)
@@ -2059,11 +2118,15 @@ async def run_banner_pipeline(message: Message, state: FSMContext, data: dict):
     done = {"n": 0, "ok": 0}
 
     async def gen_banner(idx: int, prompt: str):
-        url = await piapi_client.generate_image(prompt, ref_urls or None, aspect_ratio="16:9")
+        url = await piapi_client.generate_image(prompt, ref_urls or None, aspect_ratio=banner_ar)
         done["n"] += 1
         if url:
             done["ok"] += 1
-            await _send_image(message, url, prompt, f"Баннер {idx}/{len(prompts)}", [render_fid] if render_fid else [])
+            await _send_image(
+                message, url, prompt, f"Баннер {idx}/{len(prompts)}",
+                [render_fid] if render_fid else [],
+                crop_size=crop_size,
+            )
         else:
             await message.answer(f"Баннер {idx}: генерация не удалась.")
         try:
@@ -2220,6 +2283,45 @@ async def banner_new_design_request(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Генерирую с новым запросом…", reply_markup=ReplyKeyboardRemove())
     await run_banner_pipeline(message, state, data)
+
+
+async def _crop_image_bytes(url: str, width: int, height: int) -> bytes:
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.get(url)
+        r.raise_for_status()
+    img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    iw, ih = img.size
+    left = max(0, (iw - width) // 2)
+    top = max(0, (ih - height) // 2)
+    right = min(iw, left + width)
+    bottom = min(ih, top + height)
+    cropped = img.crop((left, top, right, bottom))
+    buf = io.BytesIO()
+    cropped.save(buf, format="JPEG", quality=95)
+    return buf.getvalue()
+
+
+@dp.callback_query(CropCallback.filter())
+async def handle_crop(query: CallbackQuery, callback_data: CropCallback):
+    await query.answer("Обрезаю…")
+    entry = _image_store.get(callback_data.image_id)
+    if not entry:
+        await query.message.answer("Изображение не найдено — возможно, бот перезапускался.")
+        return
+    url = entry.get("url")
+    crop_w = entry.get("crop_w")
+    crop_h = entry.get("crop_h")
+    if not (url and crop_w and crop_h):
+        await query.message.answer("Параметры обрезки не найдены.")
+        return
+    try:
+        data = await _crop_image_bytes(url, crop_w, crop_h)
+        await query.message.answer_photo(
+            BufferedInputFile(data, filename="banner_cropped.jpg"),
+            caption=f"✂️ Обрезано по центру: {crop_w}×{crop_h}",
+        )
+    except Exception as e:
+        await query.message.answer(f"❌ Ошибка обрезки: {e}")
 
 
 # Catch-all: если состояние сброшено (редеплой) — отправляем в начало
