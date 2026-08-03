@@ -137,3 +137,53 @@ async def generate_prompts(
         raise ValueError(f"GPT вернул только {len(prompts)} промтов из 10. Ответ: {raw[:300]}")
 
     return prompts[:10]
+
+
+_SLIDE_SYSTEM_PROMPT = """Ты — профессиональный дизайнер внутренних слайдов карточки товара для маркетплейсов (Ozon, Wildberries).
+
+Задача: по запросу пользователя сгенерировать ровно 3 уникальных промта для нейросети Nano Banana Pro (Google Gemini image generator).
+
+Правила:
+1. Каждый промт — на РУССКОМ языке
+2. Каждый промт описывает УНИКАЛЬНУЮ концепцию слайда: разная подача, композиция, акценты
+3. Упаковка товара берётся СТРОГО с предоставленного рендера — точная форма и этикетка без изменений
+4. Если предоставлен слайд конкурента — использовать его стиль и композицию как референс, не копируя бренд
+5. Текстовые блоки описывай как: UI-плашка с текстом "текст"
+6. Слайд должен быть информативным и продающим: показывать детали товара, процесс, результат или преимущества
+7. Каждый промт заканчивай на: "Вертикальный формат 3:4, современный UX/UI дизайн, высококачественный внутренний слайд карточки товара для маркетплейса"
+
+Верни ровно 3 промта в виде нумерованного списка — без JSON, без markdown, без пояснений:
+1. промт один
+2. промт два
+3. промт три"""
+
+
+async def generate_slide_prompts(
+    user_request: str,
+    paint_type: str = "furniture",
+) -> list[str]:
+    client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
+
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": _SLIDE_SYSTEM_PROMPT},
+            {"role": "user", "content": user_request},
+        ],
+    )
+
+    raw = response.choices[0].message.content.strip()
+    logger.info("GPT generate_slide_prompts response: %s", raw[:300])
+
+    prompts = []
+    for line in raw.splitlines():
+        line = line.strip()
+        m = re.match(r'^\d{1,2}[.)]\s+(.+)$', line)
+        if m:
+            prompts.append(m.group(1).strip())
+
+    if len(prompts) < 1:
+        raise ValueError(f"GPT вернул только {len(prompts)} промтов из 3. Ответ: {raw[:300]}")
+
+    return prompts[:3]

@@ -31,6 +31,7 @@ _scale_data: dict[str, dict] = {}   # image_id -> {products, selected}
 
 class CoverForm(StatesGroup):
     # Shared first steps
+    content_type_select = State()   # Обложка vs Внутренние слайды
     ref_photo = State()
     mode_select = State()
 
@@ -66,6 +67,17 @@ class MultiplyFeedbackForm(StatesGroup):
     awaiting_new_ref = State()
 
 
+class SlideForm(StatesGroup):
+    type_select = State()           # с референса / с ноля
+    competitor_slide = State()      # фото слайда конкурента (только "с референса")
+    product_search = State()        # поиск товара в базе
+    render_photo = State()          # рендер банки краски
+    design_request = State()        # дизайнерский запрос
+    text_content = State()          # что написать на слайде
+    post_gen = State()              # после генерации: ещё / изменить запрос / заново
+    new_design_request = State()    # изменить дизайнерский запрос
+
+
 class MultiplyCallback(CallbackData, prefix="mul"):
     image_id: str
 
@@ -87,6 +99,10 @@ class UtpAddCallback(CallbackData, prefix="utpadd"):
 
 
 class ProductSelectCallback(CallbackData, prefix="psel"):
+    idx: int
+
+
+class SlideProductSelectCallback(CallbackData, prefix="spsel"):
     idx: int
 
 
@@ -113,6 +129,32 @@ START_KB = _kb("🚀 Запустить бот")
 AGAIN_KB = _kb("🔄 Сгенерировать ещё")
 RESTART_KB = _kb(RESTART_BTN)
 BACK_RESTART_KB = _kb(BACK_BTN, RESTART_BTN)
+
+PRODUCT_TYPE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🖼 Обложка для маркетплейса")],
+        [KeyboardButton(text="📑 Внутренние слайды")],
+    ],
+    resize_keyboard=True,
+)
+
+SLIDE_TYPE_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📎 С референса конкурента")],
+        [KeyboardButton(text="✨ С ноля")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+SLIDE_POST_GEN_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔄 Ещё такие же")],
+        [KeyboardButton(text="✏️ Изменить дизайнерский запрос")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
 BACK_SKIP_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="Пропустить")],
@@ -422,6 +464,15 @@ async def handle_back(message: Message, state: FSMContext):
 async def _start_form(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
+        "Что хотите создать?",
+        reply_markup=PRODUCT_TYPE_KB,
+    )
+    await state.set_state(CoverForm.content_type_select)
+
+
+@dp.message(CoverForm.content_type_select, F.text == "🖼 Обложка для маркетплейса")
+async def product_type_cover(message: Message, state: FSMContext):
+    await message.answer(
         "Отправьте <b>референсное фото товара</b> (упаковка/банка).\n"
         "Этот шаг обязателен — пропустить нельзя.",
         parse_mode="HTML",
@@ -430,12 +481,21 @@ async def _start_form(message: Message, state: FSMContext):
     await state.set_state(CoverForm.ref_photo)
 
 
+@dp.message(CoverForm.content_type_select, F.text == "📑 Внутренние слайды")
+async def product_type_slides(message: Message, state: FSMContext):
+    await message.answer(
+        "Выберите способ создания слайда:",
+        reply_markup=SLIDE_TYPE_KB,
+    )
+    await state.set_state(SlideForm.type_select)
+
+
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "<b>Cover Bot — генератор обложек для маркетплейсов</b>\n\n"
-        "Нажмите кнопку ниже, чтобы начать создание обложек.",
+        "<b>Cover Bot — генератор контента для маркетплейсов</b>\n\n"
+        "Нажмите кнопку ниже, чтобы начать.",
         parse_mode="HTML",
         reply_markup=START_KB,
     )
@@ -997,6 +1057,43 @@ def _swap_color_in_prompt(prompt: str, old_code: str, old_name: str, new_code: s
     return result
 
 
+def _build_slide_request(data: dict) -> str:
+    product = data.get("product_name", "")
+    paint_type = data.get("paint_type", "furniture")
+    color_name = data.get("color_name", "")
+    color_code = data.get("color_code", "")
+    design_req = data.get("slide_design_request", "")
+    text_content = data.get("slide_text_content", "")
+    has_competitor = bool(data.get("slide_competitor_fid"))
+
+    paint_labels = {
+        "walls": "краска для стен", "lacquer": "лак для мебели",
+        "primer": "грунтовка для мебели", "furniture": "краска для мебели",
+    }
+    paint_label = paint_labels.get(paint_type, paint_type)
+
+    color_part = ""
+    if color_name:
+        rgb_hint = f" (точный RGB: {color_code})" if color_code else ""
+        color_part = f"Цвет: «{color_name}»{rgb_hint}. "
+    elif color_code:
+        color_part = f"Цвет: RGB({color_code}). "
+
+    ref_note = (
+        "Слайд конкурента предоставлен — используй его как референс стиля и композиции, "
+        "не копируя бренд. " if has_competitor else ""
+    )
+
+    return (
+        f'Создай 3 уникальных промта для внутреннего слайда карточки товара "{product}" ({paint_label}). '
+        f"{color_part}"
+        f"Рендер банки предоставлен — упаковку бери СТРОГО с рендера без изменений. "
+        f"{ref_note}"
+        f"Дизайнерский запрос (что показать на слайде): {design_req}. "
+        f"Текст, который должен быть на слайде: {text_content}."
+    )
+
+
 def _build_request(data: dict) -> str:
     product = data["product_name"]
     volume = data["volume"]
@@ -1536,6 +1633,241 @@ async def handle_scale_confirm(query: CallbackQuery, callback_data: ScaleColorsC
         await status.edit_text(f"✅ Готово! {done['ok']}/{len(target_products)} обложек сгенерировано.")
     except Exception:
         pass
+
+
+# =====================================================================
+# === ВНУТРЕННИЕ СЛАЙДЫ ===
+# =====================================================================
+
+def _build_slide_search_kb(results: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for i, p in enumerate(results):
+        rows.append([InlineKeyboardButton(
+            text=_product_btn_text(p),
+            callback_data=SlideProductSelectCallback(idx=i).pack(),
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(SlideForm.type_select, F.text == "📎 С референса конкурента")
+async def slide_type_reference(message: Message, state: FSMContext):
+    await state.update_data(slide_with_reference=True)
+    await message.answer(
+        "Отправьте <b>фото внутреннего слайда конкурента</b> — он станет референсом стиля:",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.competitor_slide)
+
+
+@dp.message(SlideForm.type_select, F.text == "✨ С ноля")
+async def slide_type_scratch(message: Message, state: FSMContext):
+    await state.update_data(slide_with_reference=False)
+    await message.answer(
+        "Введите название товара или линейки для поиска в базе:",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.product_search)
+
+
+@dp.message(SlideForm.type_select)
+async def slide_type_bad(message: Message):
+    await message.answer("Выберите вариант с помощью кнопок:", reply_markup=SLIDE_TYPE_KB)
+
+
+@dp.message(SlideForm.competitor_slide, F.photo)
+async def slide_competitor_photo(message: Message, state: FSMContext):
+    await state.update_data(slide_competitor_fid=message.photo[-1].file_id)
+    await message.answer(
+        "Хорошо! Теперь введите название товара или линейки для поиска в базе:",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.product_search)
+
+
+@dp.message(SlideForm.competitor_slide)
+async def slide_competitor_bad(message: Message):
+    await message.answer("Отправьте фото слайда конкурента:", reply_markup=RESTART_KB)
+
+
+@dp.message(SlideForm.product_search, F.text)
+async def slide_product_search(message: Message, state: FSMContext):
+    query = message.text.strip()
+    status = await message.answer("🔍 Ищу в базе…")
+    try:
+        products = await sheets_client.load_products()
+    except Exception as e:
+        await status.edit_text(f"❌ Не удалось загрузить базу: {e}")
+        return
+    results = sheets_client.search_products(query, products)
+    if not results:
+        await status.edit_text(f"Ничего не найдено по «{query}». Попробуйте другой запрос.")
+        return
+    if len(results) > 10:
+        await status.edit_text(
+            f"Найдено {len(results)} позиций — слишком много. Уточните запрос."
+        )
+        return
+    await state.update_data(slide_search_results=results)
+    await status.edit_text(
+        f"Найдено {len(results)} позиций. Выберите товар:",
+        reply_markup=_build_slide_search_kb(results),
+    )
+
+
+@dp.callback_query(SlideProductSelectCallback.filter(), SlideForm.product_search)
+async def slide_product_select(
+    query: CallbackQuery,
+    callback_data: SlideProductSelectCallback,
+    state: FSMContext,
+):
+    await query.answer()
+    data = await state.get_data()
+    results: list[dict] = data.get("slide_search_results", [])
+    idx = callback_data.idx
+    if idx >= len(results):
+        await query.message.answer("Ошибка выбора, попробуйте снова.", reply_markup=RESTART_KB)
+        return
+    product = results[idx]
+    await state.update_data(
+        product_name=product["name"],
+        paint_type=product["paint_type"],
+        color_code=product["rgb"] if product["rgb"] else None,
+        color_name=product["color_name"],
+        line=product["line"],
+    )
+    color_info = f"\n<b>Цвет:</b> {product['color_name']}" if product["color_name"] else ""
+    await query.message.answer(
+        f"✅ <b>{product['name']}</b>{color_info}",
+        parse_mode="HTML",
+    )
+    await query.message.answer(
+        "Отправьте <b>рендер банки краски</b> — чистое изображение упаковки:",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.render_photo)
+
+
+@dp.message(SlideForm.render_photo, F.photo)
+async def slide_render_photo(message: Message, state: FSMContext):
+    await state.update_data(slide_render_fid=message.photo[-1].file_id)
+    await message.answer(
+        "Что нужно <b>показать</b> на слайде?\n"
+        "<i>Пример: процесс нанесения, поверхность до/после, крупный план банки, схема применения</i>",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.design_request)
+
+
+@dp.message(SlideForm.render_photo)
+async def slide_render_bad(message: Message):
+    await message.answer("Отправьте фото рендера банки:", reply_markup=RESTART_KB)
+
+
+@dp.message(SlideForm.design_request, F.text)
+async def slide_design_request(message: Message, state: FSMContext):
+    await state.update_data(slide_design_request=message.text.strip())
+    await message.answer(
+        "Что нужно <b>написать</b> на слайде?\n"
+        "<i>Пример: «Экономичный расход 12 м²/л», «Не требует грунтовки», список характеристик</i>",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(SlideForm.text_content)
+
+
+@dp.message(SlideForm.text_content, F.text)
+async def slide_text_content(message: Message, state: FSMContext):
+    await state.update_data(slide_text_content=message.text.strip())
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Принято! Генерирую слайды…", reply_markup=ReplyKeyboardRemove())
+    await run_slide_pipeline(message, state, data)
+
+
+async def run_slide_pipeline(message: Message, state: FSMContext, data: dict):
+    user_request = _build_slide_request(data)
+
+    status = await message.answer("Генерирую промты для слайдов…")
+
+    try:
+        prompts = await claude_client.generate_slide_prompts(user_request, data.get("paint_type", "furniture"))
+    except Exception as e:
+        await status.edit_text(f"Ошибка генерации промтов: {e}")
+        await message.answer("Попробуйте ещё раз:", reply_markup=SLIDE_POST_GEN_KB)
+        return
+
+    await status.edit_text(f"{len(prompts)} промта готово! Отправляю в Nano Banana Pro…")
+
+    render_fid = data.get("slide_render_fid")
+    competitor_fid = data.get("slide_competitor_fid")
+
+    ref_fids = []
+    if competitor_fid:
+        ref_fids.append(competitor_fid)
+    if render_fid:
+        ref_fids.append(render_fid)
+
+    ref_urls = await _fresh_ref_urls(ref_fids) if ref_fids else []
+
+    done = {"n": 0, "ok": 0}
+
+    async def gen_slide(idx: int, prompt: str):
+        url = await piapi_client.generate_image(prompt, ref_urls or None)
+        done["n"] += 1
+        if url:
+            done["ok"] += 1
+            await _send_image(message, url, prompt, f"Слайд {idx}/{len(prompts)}", ref_fids)
+        else:
+            await message.answer(f"Слайд {idx}: генерация не удалась.")
+        try:
+            await status.edit_text(f"Обработано {done['n']}/{len(prompts)} | Готово: {done['ok']}")
+        except Exception:
+            pass
+
+    await asyncio.gather(*[gen_slide(i + 1, p) for i, p in enumerate(prompts)])
+
+    try:
+        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/{len(prompts)} слайдов.")
+    except Exception:
+        pass
+
+    # Сохраняем данные для повторной генерации
+    await state.update_data(**data)
+    await state.set_state(SlideForm.post_gen)
+
+    if done["ok"] == 0:
+        await message.answer(
+            "⚠️ Ни один слайд не сгенерировался. Проверьте баланс PiAPI.",
+            reply_markup=SLIDE_POST_GEN_KB,
+        )
+    else:
+        await message.answer("Что дальше?", reply_markup=SLIDE_POST_GEN_KB)
+
+
+@dp.message(SlideForm.post_gen, F.text == "🔄 Ещё такие же")
+async def slide_post_again(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Генерирую ещё раз…", reply_markup=ReplyKeyboardRemove())
+    await run_slide_pipeline(message, state, data)
+
+
+@dp.message(SlideForm.post_gen, F.text == "✏️ Изменить дизайнерский запрос")
+async def slide_post_change_design(message: Message, state: FSMContext):
+    await message.answer("Введите новый дизайнерский запрос:", reply_markup=RESTART_KB)
+    await state.set_state(SlideForm.new_design_request)
+
+
+@dp.message(SlideForm.new_design_request, F.text)
+async def slide_new_design_request(message: Message, state: FSMContext):
+    await state.update_data(slide_design_request=message.text.strip())
+    data = await state.get_data()
+    await state.clear()
+    await message.answer("Генерирую с новым запросом…", reply_markup=ReplyKeyboardRemove())
+    await run_slide_pipeline(message, state, data)
 
 
 async def main():
