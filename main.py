@@ -142,6 +142,7 @@ SLIDE_TYPE_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📎 С референса конкурента")],
         [KeyboardButton(text="✨ С ноля")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -454,6 +455,54 @@ async def handle_back(message: Message, state: FSMContext):
             "Введите <b>подзаголовок</b>:", parse_mode="HTML", reply_markup=BACK_RESTART_KB,
         )
         await state.set_state(CoverForm.subtitle)
+
+    # Slides flow
+    elif current == SlideForm.type_select.state:
+        await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
+        await state.set_state(CoverForm.content_type_select)
+
+    elif current == SlideForm.competitor_slide.state:
+        await message.answer("Выберите способ создания слайда:", reply_markup=SLIDE_TYPE_KB)
+        await state.set_state(SlideForm.type_select)
+
+    elif current == SlideForm.product_search.state:
+        if data.get("slide_with_reference"):
+            await message.answer(
+                "Отправьте <b>фото внутреннего слайда конкурента</b>:",
+                parse_mode="HTML",
+                reply_markup=BACK_RESTART_KB,
+            )
+            await state.set_state(SlideForm.competitor_slide)
+        else:
+            await message.answer("Выберите способ создания слайда:", reply_markup=SLIDE_TYPE_KB)
+            await state.set_state(SlideForm.type_select)
+
+    elif current == SlideForm.render_photo.state:
+        await message.answer(
+            "Введите название товара или линейки для поиска в базе:",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(SlideForm.product_search)
+
+    elif current == SlideForm.design_request.state:
+        await message.answer(
+            "Отправьте <b>рендер банки краски</b>:",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(SlideForm.render_photo)
+
+    elif current == SlideForm.text_content.state:
+        await message.answer(
+            "Что нужно <b>показать</b> на слайде?",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(SlideForm.design_request)
+
+    elif current == SlideForm.new_design_request.state:
+        await message.answer("Что дальше?", reply_markup=SLIDE_POST_GEN_KB)
+        await state.set_state(SlideForm.post_gen)
 
     else:
         await message.answer("На этом шаге вернуться назад нельзя.", reply_markup=RESTART_KB)
@@ -1087,7 +1136,7 @@ def _build_slide_request(data: dict) -> str:
     return (
         f'Создай 3 уникальных промта для внутреннего слайда карточки товара "{product}" ({paint_label}). '
         f"{color_part}"
-        f"Рендер банки предоставлен — упаковку бери СТРОГО с рендера без изменений. "
+        f"КРИТИЧЕСКИ ВАЖНО: упаковку (банку/тару) бери СТРОГО с предоставленного рендера ТОЧЬ-В-ТОЧЬ — форма, этикетка, цвет, пропорции без каких-либо изменений. "
         f"{ref_note}"
         f"Дизайнерский запрос (что показать на слайде): {design_req}. "
         f"Текст, который должен быть на слайде: {text_content}."
@@ -1655,7 +1704,7 @@ async def slide_type_reference(message: Message, state: FSMContext):
     await message.answer(
         "Отправьте <b>фото внутреннего слайда конкурента</b> — он станет референсом стиля:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.competitor_slide)
 
@@ -1665,7 +1714,7 @@ async def slide_type_scratch(message: Message, state: FSMContext):
     await state.update_data(slide_with_reference=False)
     await message.answer(
         "Введите название товара или линейки для поиска в базе:",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.product_search)
 
@@ -1680,14 +1729,14 @@ async def slide_competitor_photo(message: Message, state: FSMContext):
     await state.update_data(slide_competitor_fid=message.photo[-1].file_id)
     await message.answer(
         "Хорошо! Теперь введите название товара или линейки для поиска в базе:",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.product_search)
 
 
 @dp.message(SlideForm.competitor_slide)
 async def slide_competitor_bad(message: Message):
-    await message.answer("Отправьте фото слайда конкурента:", reply_markup=RESTART_KB)
+    await message.answer("Отправьте фото слайда конкурента:", reply_markup=BACK_RESTART_KB)
 
 
 @dp.message(SlideForm.product_search, F.text)
@@ -1726,7 +1775,7 @@ async def slide_product_select(
     results: list[dict] = data.get("slide_search_results", [])
     idx = callback_data.idx
     if idx >= len(results):
-        await query.message.answer("Ошибка выбора, попробуйте снова.", reply_markup=RESTART_KB)
+        await query.message.answer("Ошибка выбора, попробуйте снова.", reply_markup=BACK_RESTART_KB)
         return
     product = results[idx]
     await state.update_data(
@@ -1744,7 +1793,7 @@ async def slide_product_select(
     await query.message.answer(
         "Отправьте <b>рендер банки краски</b> — чистое изображение упаковки:",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.render_photo)
 
@@ -1756,14 +1805,14 @@ async def slide_render_photo(message: Message, state: FSMContext):
         "Что нужно <b>показать</b> на слайде?\n"
         "<i>Пример: процесс нанесения, поверхность до/после, крупный план банки, схема применения</i>",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.design_request)
 
 
 @dp.message(SlideForm.render_photo)
 async def slide_render_bad(message: Message):
-    await message.answer("Отправьте фото рендера банки:", reply_markup=RESTART_KB)
+    await message.answer("Отправьте фото рендера банки:", reply_markup=BACK_RESTART_KB)
 
 
 @dp.message(SlideForm.design_request, F.text)
@@ -1773,7 +1822,7 @@ async def slide_design_request(message: Message, state: FSMContext):
         "Что нужно <b>написать</b> на слайде?\n"
         "<i>Пример: «Экономичный расход 12 м²/л», «Не требует грунтовки», список характеристик</i>",
         parse_mode="HTML",
-        reply_markup=RESTART_KB,
+        reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(SlideForm.text_content)
 
@@ -1857,7 +1906,7 @@ async def slide_post_again(message: Message, state: FSMContext):
 
 @dp.message(SlideForm.post_gen, F.text == "✏️ Изменить дизайнерский запрос")
 async def slide_post_change_design(message: Message, state: FSMContext):
-    await message.answer("Введите новый дизайнерский запрос:", reply_markup=RESTART_KB)
+    await message.answer("Введите новый дизайнерский запрос:", reply_markup=BACK_RESTART_KB)
     await state.set_state(SlideForm.new_design_request)
 
 
