@@ -33,6 +33,27 @@ bot = Bot(token=config.TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 
+class AccessRequestCB(CallbackData, prefix="areq"):
+    action: str   # request | approve | deny
+    user_id: int
+
+
+_pending_requests: set[int] = set()   # user_id ждущих одобрения
+
+
+def _access_request_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="📨 Подать заявку", callback_data=AccessRequestCB(action="request", user_id=user_id).pack()),
+    ]])
+
+
+def _admin_request_kb(user_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Разрешить", callback_data=AccessRequestCB(action="approve", user_id=user_id).pack()),
+        InlineKeyboardButton(text="❌ Отклонить", callback_data=AccessRequestCB(action="deny", user_id=user_id).pack()),
+    ]])
+
+
 class AccessMiddleware(BaseMiddleware):
     async def __call__(self, handler, event: TelegramObject, data: dict):
         user = data.get("event_from_user")
@@ -41,15 +62,26 @@ class AccessMiddleware(BaseMiddleware):
         if config.ADMIN_USER_ID == 0 or whitelist.is_allowed(user.id, config.ADMIN_USER_ID):
             return await handler(event, data)
         from aiogram.types import Message, CallbackQuery
-        if isinstance(event, Message):
-            await event.answer(
-                f"⛔ Нет доступа.\n"
-                f"Ваш Telegram ID: <code>{user.id}</code>\n"
-                f"Передайте его администратору для получения доступа.",
-                parse_mode="HTML",
-            )
-        elif isinstance(event, CallbackQuery):
+        if isinstance(event, CallbackQuery):
+            # Разрешаем только кнопку "Подать заявку"
+            try:
+                cb = AccessRequestCB.unpack(event.data)
+                if cb.action == "request":
+                    return await handler(event, data)
+            except Exception:
+                pass
             await event.answer("Нет доступа.", show_alert=True)
+            return
+        if isinstance(event, Message):
+            if user.id in _pending_requests:
+                await event.answer("⏳ Ваша заявка уже отправлена. Ожидайте решения администратора.")
+            else:
+                await event.answer(
+                    "⛔ У вас нет доступа к боту.\n"
+                    "Нажмите кнопку ниже, чтобы запросить доступ:",
+                    reply_markup=_access_request_kb(user.id),
+                )
+
 
 _image_store: dict[str, dict] = {}
 _scale_data: dict[str, dict] = {}   # image_id -> {products, selected}
@@ -745,6 +777,69 @@ async def cmd_users(message: Message):
 @dp.message(Command("myid"))
 async def cmd_myid(message: Message):
     await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
+
+
+@dp.callback_query(AccessRequestCB.filter(F.action == "request"))
+async def handle_access_request(query: CallbackQuery, callback_data: AccessRequestCB):
+    user = query.from_user
+    if whitelist.is_allowed(user.id, config.ADMIN_USER_ID):
+        await query.answer("У вас уже есть доступ!", show_alert=True)
+        return
+    if user.id in _pending_requests:
+        await query.answer("Заявка уже отправлена. Ожидайте ответа.", show_alert=True)
+        return
+    _pending_requests.add(user.id)
+    username = f"@{user.username}" if user.username else "нет username"
+    name = " ".join(filter(None, [user.first_name, user.last_name]))
+    try:
+        await bot.send_message(
+            config.ADMIN_USER_ID,
+            f"📨 <b>Запрос доступа</b>\n\n"
+            f"Имя: {name}\n"
+            f"Username: {username}\n"
+            f"ID: <code>{user.id}</code>",
+            parse_mode="HTML",
+            reply_markup=_admin_request_kb(user.id),
+        )
+    except Exception:
+        _pending_requests.discard(user.id)
+        await query.answer("Не удалось отправить заявку. Попробуйте позже.", show_alert=True)
+        return
+    await query.answer("✅ Заявка отправлена! Ожидайте решения.", show_alert=True)
+    await query.message.edit_text(
+        "⏳ Ваша заявка отправлена администратору.\nОжидайте — вы получите уведомление о решении.",
+    )
+
+
+@dp.callback_query(AccessRequestCB.filter(F.action == "approve"))
+async def handle_access_approve(query: CallbackQuery, callback_data: AccessRequestCB):
+    if query.from_user.id != config.ADMIN_USER_ID:
+        await query.answer("Нет прав.", show_alert=True)
+        return
+    uid = callback_data.user_id
+    whitelist.add(uid)
+    _pending_requests.discard(uid)
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer("✅ Доступ выдан.")
+    try:
+        await bot.send_message(uid, "✅ Ваш запрос одобрен! Нажмите /start чтобы начать.")
+    except Exception:
+        pass
+
+
+@dp.callback_query(AccessRequestCB.filter(F.action == "deny"))
+async def handle_access_deny(query: CallbackQuery, callback_data: AccessRequestCB):
+    if query.from_user.id != config.ADMIN_USER_ID:
+        await query.answer("Нет прав.", show_alert=True)
+        return
+    uid = callback_data.user_id
+    _pending_requests.discard(uid)
+    await query.message.edit_reply_markup(reply_markup=None)
+    await query.answer("❌ Доступ отклонён.")
+    try:
+        await bot.send_message(uid, "❌ В доступе отказано.")
+    except Exception:
+        pass
 
 
 @dp.message(CommandStart())
