@@ -22,11 +22,34 @@ import config
 import claude_client
 import piapi_client
 import sheets_client
+import whitelist
+
+from aiogram import BaseMiddleware
+from aiogram.types import TelegramObject
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 bot = Bot(token=config.TELEGRAM_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+
+class AccessMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user = data.get("event_from_user")
+        if user is None:
+            return await handler(event, data)
+        if config.ADMIN_USER_ID == 0 or whitelist.is_allowed(user.id, config.ADMIN_USER_ID):
+            return await handler(event, data)
+        from aiogram.types import Message, CallbackQuery
+        if isinstance(event, Message):
+            await event.answer(
+                f"⛔ Нет доступа.\n"
+                f"Ваш Telegram ID: <code>{user.id}</code>\n"
+                f"Передайте его администратору для получения доступа.",
+                parse_mode="HTML",
+            )
+        elif isinstance(event, CallbackQuery):
+            await event.answer("Нет доступа.", show_alert=True)
 
 _image_store: dict[str, dict] = {}
 _scale_data: dict[str, dict] = {}   # image_id -> {products, selected}
@@ -48,6 +71,8 @@ class CoverForm(StatesGroup):
     volume_unit_select = State()
     card_headline = State()
     card_subtitle = State()
+
+    cover_count = State()           # сколько обложек сгенерировать
 
     # === Flexible flow ===
     paint_type_select = State()
@@ -204,6 +229,15 @@ BACK_SKIP_KB = ReplyKeyboardMarkup(
         [KeyboardButton(text="Пропустить")],
         [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+COVER_COUNT_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="3"), KeyboardButton(text="5")],
+        [KeyboardButton(text="10"), KeyboardButton(text="15")],
+        [KeyboardButton(text=BACK_BTN), KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
 )
@@ -504,6 +538,14 @@ async def handle_back(message: Message, state: FSMContext):
         )
         await state.set_state(CoverForm.subtitle)
 
+    # Cover count (last step before generation)
+    elif current == CoverForm.cover_count.state:
+        await message.answer(
+            "Введите дизайнерский запрос или нажмите «Пропустить»:",
+            reply_markup=BACK_SKIP_KB,
+        )
+        await state.set_state(CoverForm.design_request)
+
     # Slides flow
     elif current == SlideForm.type_select.state:
         await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
@@ -660,6 +702,49 @@ async def banner_format_horizontal(message: Message, state: FSMContext):
 @dp.message(BannerForm.format_select)
 async def banner_format_bad(message: Message):
     await message.answer("Выберите формат с помощью кнопок:", reply_markup=BANNER_FORMAT_KB)
+
+
+@dp.message(Command("allow"))
+async def cmd_allow(message: Message):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Использование: /allow <user_id>")
+        return
+    uid = int(parts[1])
+    whitelist.add(uid)
+    await message.answer(f"✅ Пользователь <code>{uid}</code> добавлен.", parse_mode="HTML")
+
+
+@dp.message(Command("deny"))
+async def cmd_deny(message: Message):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        return
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].lstrip("-").isdigit():
+        await message.answer("Использование: /deny <user_id>")
+        return
+    uid = int(parts[1])
+    whitelist.remove(uid)
+    await message.answer(f"✅ Пользователь <code>{uid}</code> удалён.", parse_mode="HTML")
+
+
+@dp.message(Command("users"))
+async def cmd_users(message: Message):
+    if message.from_user.id != config.ADMIN_USER_ID:
+        return
+    ids = whitelist.list_ids()
+    if not ids:
+        await message.answer("Список разрешённых пользователей пуст.\nДобавьте: /allow <user_id>")
+    else:
+        lines = "\n".join(f"• <code>{uid}</code>" for uid in ids)
+        await message.answer(f"👥 Разрешённые пользователи ({len(ids)}):\n{lines}", parse_mode="HTML")
+
+
+@dp.message(Command("myid"))
+async def cmd_myid(message: Message):
+    await message.answer(f"Ваш Telegram ID: <code>{message.from_user.id}</code>", parse_mode="HTML")
 
 
 @dp.message(CommandStart())
@@ -1198,9 +1283,24 @@ async def step_badges(message: Message, state: FSMContext):
 async def step_design_request(message: Message, state: FSMContext):
     text = message.text.strip()
     await state.update_data(design_request=None if text == "Пропустить" else text)
+    await message.answer("Сколько обложек сгенерировать?", reply_markup=COVER_COUNT_KB)
+    await state.set_state(CoverForm.cover_count)
+
+
+@dp.message(CoverForm.cover_count, F.text)
+async def step_cover_count(message: Message, state: FSMContext):
+    text = message.text.strip()
+    try:
+        count = int(text)
+        if not (1 <= count <= 20):
+            raise ValueError
+    except ValueError:
+        await message.answer("Введите число от 1 до 20:", reply_markup=COVER_COUNT_KB)
+        return
+    await state.update_data(cover_count=count)
     data = await state.get_data()
     await state.clear()
-    await message.answer("Принято! Запускаю генерацию…", reply_markup=ReplyKeyboardRemove())
+    await message.answer(f"Принято! Запускаю генерацию {count} обложек…", reply_markup=ReplyKeyboardRemove())
     await run_pipeline(message, data)
 
 
@@ -1381,6 +1481,7 @@ async def run_pipeline(message: Message, data: dict):
     photo_ids: list[str] = data.get("photo_ids", [])
     color_photo_ids: list[str] = data.get("color_photo_ids", [])
     paint_type: str = data.get("paint_type", "furniture")
+    count: int = data.get("cover_count", config.NUM_IMAGES)
     _pipe_meta = {
         "line": data.get("line") or "",
         "paint_type": paint_type,
@@ -1388,7 +1489,7 @@ async def run_pipeline(message: Message, data: dict):
         "color_name": data.get("color_name") or "",
     }
 
-    status = await message.answer("Генерирую промты через Claude…")
+    status = await message.answer("Генерирую промты…")
 
     image_bytes: bytes | None = None
     if photo_ids:
@@ -1431,13 +1532,14 @@ async def run_pipeline(message: Message, data: dict):
         return
 
     await status.edit_text(
-        "10 промтов готовы! Отправляю в Nano Banana Pro…\n"
+        f"{len(prompts)} промтов готовы! Отправляю в Nano Banana Pro…\n"
         "Обычно занимает 1–2 минуты."
     )
 
     ref_file_ids = photo_ids[:4]
     ref_urls = await _fresh_ref_urls(ref_file_ids)
 
+    selected_prompts = prompts[:count]
     done = {"n": 0, "ok": 0}
 
     async def gen_and_send(idx: int, prompt: str):
@@ -1450,7 +1552,7 @@ async def run_pipeline(message: Message, data: dict):
         if url:
             done["ok"] += 1
             try:
-                await _send_image(message, url, prompt, f"Вариант {idx}/10", ref_file_ids, meta=_pipe_meta)
+                await _send_image(message, url, prompt, f"Вариант {idx}/{count}", ref_file_ids, meta=_pipe_meta)
             except Exception as e:
                 logging.error("_send_image idx=%d error: %s", idx, e)
         else:
@@ -1459,17 +1561,17 @@ async def run_pipeline(message: Message, data: dict):
             except Exception:
                 pass
         try:
-            await status.edit_text(f"Обработано {done['n']}/10 | Готово: {done['ok']}")
+            await status.edit_text(f"Обработано {done['n']}/{count} | Готово: {done['ok']}")
         except Exception:
             pass
 
     try:
-        await asyncio.gather(*[gen_and_send(i + 1, p) for i, p in enumerate(prompts)])
+        await asyncio.gather(*[gen_and_send(i + 1, p) for i, p in enumerate(selected_prompts)])
     except Exception as e:
         logging.error("gather error: %s", e)
 
     try:
-        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/10 обложек.")
+        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/{count} обложек.")
     except Exception:
         pass
 
@@ -2333,6 +2435,13 @@ async def catch_all(message: Message, state: FSMContext):
 
 
 async def main():
+    whitelist.load(extra_ids=config.ALLOWED_USER_IDS)
+    if config.ADMIN_USER_ID:
+        logging.info("Admin ID: %d | Whitelist: %d users", config.ADMIN_USER_ID, len(whitelist.list_ids()))
+    else:
+        logging.warning("ADMIN_USER_ID not set — access control disabled")
+    dp.message.middleware(AccessMiddleware())
+    dp.callback_query.middleware(AccessMiddleware())
     logging.info("Бот запущен")
     await dp.start_polling(bot)
 
