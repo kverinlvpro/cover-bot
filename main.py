@@ -1424,6 +1424,17 @@ def _swap_color_in_prompt(prompt: str, old_code: str, old_name: str, new_code: s
     return result
 
 
+def _format_design_params(raw: str) -> str:
+    """Parse comma-separated design request into a numbered requirements block."""
+    parts = [p.strip() for p in raw.replace(";", ",").split(",") if p.strip()]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return f"Дизайнерское требование: {parts[0]}."
+    lines = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(parts))
+    return f"Дизайнерские требования (применить ВСЕ в каждом промте):\n{lines}"
+
+
 def _build_slide_request(data: dict) -> str:
     product = data.get("product_name", "")
     paint_type = data.get("paint_type", "furniture")
@@ -1451,13 +1462,15 @@ def _build_slide_request(data: dict) -> str:
         "не копируя бренд. " if has_competitor else ""
     )
 
+    design_block = _format_design_params(design_req) if design_req else ""
+
     return (
         f'Создай 3 уникальных промта для внутреннего слайда карточки товара "{product}" ({paint_label}). '
         f"{color_part}"
         f"КРИТИЧЕСКИ ВАЖНО: упаковку (банку/тару) бери СТРОГО с предоставленного рендера ТОЧЬ-В-ТОЧЬ — форма, этикетка, цвет, пропорции без каких-либо изменений. "
         f"{ref_note}"
-        f"Дизайнерский запрос (что показать на слайде): {design_req}. "
-        f"Текст, который должен быть на слайде: {text_content}."
+        + (f"\n{design_block}\n" if design_block else "")
+        + f"Текст, который должен быть на слайде: {text_content}."
     )
 
 
@@ -1472,10 +1485,6 @@ def _build_request(data: dict) -> str:
     color_code = data.get("color_code")
     color_name = data.get("color_name", "")
     paint_type = data.get("paint_type", "furniture")
-
-    design_part = (
-        f" В каждой идее обязательно должен присутствовать {design}." if design else ""
-    )
 
     points = [
         f'1) Нужно сделать дополнительные плашки с преимуществами: "{badges}".',
@@ -1514,11 +1523,14 @@ def _build_request(data: dict) -> str:
             )
     points.append(f"{len(points) + 1}) Дизайн должен быть выполнен в современном UX/UI стиле.")
 
+    design_block = _format_design_params(design) if design else ""
+
     return (
-        f'Мне нужно сделать 10 креативных нетипичных идей для продающей обложки карточки товара "{product}".{design_part} '
+        f'Мне нужно сделать 10 креативных нетипичных идей для продающей обложки карточки товара "{product}". '
         f"Каждую идею нужно расписать как тз промт для Nano Banana Pro. "
         f"В каждое тз нужно добавить эти пункты:\n"
         + "\n".join(points)
+        + (f"\n\n{design_block}" if design_block else "")
     )
 
 
@@ -2280,13 +2292,15 @@ def _build_banner_request(data: dict) -> str:
     elif color_code:
         color_part = f"Цвет: RGB({color_code}). "
 
+    design_block = _format_design_params(design_req) if design_req else ""
+
     return (
         f'Создай 3 уникальных промта для рекламного баннера товара "{product}" ({paint_label}). '
         f"{color_part}"
         f"КРИТИЧЕСКИ ВАЖНО: банку бери СТРОГО с предоставленного рендера ТОЧЬ-В-ТОЧЬ — "
         f"форма, этикетка, цвет, пропорции без изменений. "
-        f"Что показать на баннере: {design_req}. "
-        f'Большой заголовок (огромный жирный текст): «{headline}». '
+        + (f"\n{design_block}\n" if design_block else "")
+        + f'Большой заголовок (огромный жирный текст): «{headline}». '
         f'Мелкий подзаголовок (небольшой текст под заголовком): «{subtitle}».'
     )
 
