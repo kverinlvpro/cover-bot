@@ -825,6 +825,15 @@ async def handle_access_approve(query: CallbackQuery, callback_data: AccessReque
         await bot.send_message(uid, "✅ Ваш запрос одобрен! Нажмите /start чтобы начать.")
     except Exception:
         pass
+    # Напоминание: при перезапуске Railway whitelist.json сбрасывается.
+    # Чтобы доступ был постоянным — нужно обновить ALLOWED_USER_IDS в Railway.
+    ids_str = whitelist.allowed_ids_env_value()
+    await query.message.answer(
+        f"⚠️ <b>Важно:</b> список доступа хранится в файле и сбросится при следующем деплое.\n\n"
+        f"Чтобы сохранить навсегда — обновите переменную в Railway:\n"
+        f"<code>ALLOWED_USER_IDS={ids_str}</code>",
+        parse_mode="HTML",
+    )
 
 
 @dp.callback_query(AccessRequestCB.filter(F.action == "deny"))

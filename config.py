@@ -19,3 +19,5 @@ ALLOWED_USER_IDS: list[int] = [
     int(x.strip()) for x in os.getenv("ALLOWED_USER_IDS", "").split(",")
     if x.strip().isdigit()
 ]
+# Путь к файлу whitelist — переопределяется через WHITELIST_PATH (например, /data/whitelist.json на Railway Volume)
+WHITELIST_PATH: str = os.getenv("WHITELIST_PATH", "whitelist.json")
