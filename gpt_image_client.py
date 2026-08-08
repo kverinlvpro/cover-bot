@@ -8,13 +8,13 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_sem = asyncio.Semaphore(2)  # gpt-image-1 rate limit is lower than piapi
+_sem = asyncio.Semaphore(2)
 
 _SIZE_MAP = {
-    "3:4":  "1024x1536",
-    "9:16": "1024x1536",
-    "16:9": "1536x1024",
-    "1:1":  "1024x1024",
+    "3:4":  "1536x2048",
+    "9:16": "1152x2048",
+    "16:9": "2048x1152",
+    "1:1":  "2048x2048",
 }
 
 
@@ -23,8 +23,8 @@ async def generate_image(
     image_bytes_list: list[bytes] | None = None,
     aspect_ratio: str = "3:4",
 ) -> bytes | None:
-    """Generate an image with gpt-image-1. Returns raw JPEG/PNG bytes, or None on failure."""
-    size = _SIZE_MAP.get(aspect_ratio, "1024x1536")
+    """Generate an image with gpt-image-2 at 2K quality. Returns raw bytes, or None on failure."""
+    size = _SIZE_MAP.get(aspect_ratio, "1536x2048")
     client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
     async with _sem:
@@ -32,7 +32,7 @@ async def generate_image(
             if image_bytes_list:
                 images = [io.BytesIO(b) for b in image_bytes_list[:4]]
                 response = await client.images.edit(
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     image=images if len(images) > 1 else images[0],
                     prompt=prompt,
                     size=size,
@@ -41,7 +41,7 @@ async def generate_image(
                 )
             else:
                 response = await client.images.generate(
-                    model="gpt-image-1",
+                    model="gpt-image-2",
                     prompt=prompt,
                     size=size,
                     quality="high",
