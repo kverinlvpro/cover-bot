@@ -1798,11 +1798,13 @@ async def run_pipeline(message: Message, data: dict):
         pass
 
     if done["ok"] == 0:
-        if ai_model == "piapi" and piapi_client.last_error:
-            err_detail = f"\n\nОшибка API: <code>{piapi_client.last_error}</code>"
+        if ai_model == "gptimage" and gpt_image_client.last_error:
+            err_detail = f"\n\nОшибка OpenAI: <code>{gpt_image_client.last_error}</code>"
+        elif ai_model == "piapi" and piapi_client.last_error:
+            err_detail = f"\n\nОшибка PiAPI: <code>{piapi_client.last_error}</code>"
         else:
             err_detail = ""
-        svc = "OpenAI" if ai_model == "gptimage" else "PiAPI (Nano Banana Pro)"
+        svc = "ChatGPT Image" if ai_model == "gptimage" else "Nano Banana Pro"
         await message.answer(
             f"⚠️ Ни одно изображение не сгенерировалось ({svc}).{err_detail}",
             parse_mode="HTML",
@@ -2429,11 +2431,13 @@ async def run_slide_pipeline(message: Message, state: FSMContext, data: dict):
     await state.set_state(SlideForm.post_gen)
 
     if done["ok"] == 0:
-        if ai_model == "piapi" and piapi_client.last_error:
-            err_detail = f"\n\nОшибка API: <code>{piapi_client.last_error}</code>"
+        if ai_model == "gptimage" and gpt_image_client.last_error:
+            err_detail = f"\n\nОшибка OpenAI: <code>{gpt_image_client.last_error}</code>"
+        elif ai_model == "piapi" and piapi_client.last_error:
+            err_detail = f"\n\nОшибка PiAPI: <code>{piapi_client.last_error}</code>"
         else:
             err_detail = ""
-        svc = "OpenAI" if ai_model == "gptimage" else "PiAPI (Nano Banana Pro)"
+        svc = "ChatGPT Image" if ai_model == "gptimage" else "Nano Banana Pro"
         await message.answer(
             f"⚠️ Ни один слайд не сгенерировался ({svc}).{err_detail}",
             parse_mode="HTML",

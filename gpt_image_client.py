@@ -9,6 +9,7 @@ import config
 logger = logging.getLogger(__name__)
 
 _sem = asyncio.Semaphore(2)
+last_error: str = ""
 
 _SIZE_MAP = {
     "3:4":  "1536x2048",
@@ -23,7 +24,7 @@ async def generate_image(
     image_bytes_list: list[bytes] | None = None,
     aspect_ratio: str = "3:4",
 ) -> bytes | None:
-    """Generate an image with gpt-image-2 at 2K quality. Returns raw bytes, or None on failure."""
+    global last_error
     size = _SIZE_MAP.get(aspect_ratio, "1536x2048")
     client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
@@ -49,9 +50,12 @@ async def generate_image(
                 )
             b64 = response.data[0].b64_json
             if not b64:
-                logger.error("gpt_image_client: empty b64_json in response")
+                last_error = "empty b64_json in response"
+                logger.error("gpt_image_client: %s", last_error)
                 return None
+            last_error = ""
             return base64.b64decode(b64)
         except Exception as e:
+            last_error = str(e)
             logger.error("gpt_image_client.generate_image error: %s", e)
             return None
