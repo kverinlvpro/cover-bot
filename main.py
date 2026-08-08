@@ -20,6 +20,7 @@ from aiogram.types import (
 
 import config
 import claude_client
+import gpt_image_client
 import piapi_client
 import sheets_client
 import whitelist
@@ -90,6 +91,7 @@ _scale_data: dict[str, dict] = {}   # image_id -> {products, selected}
 class CoverForm(StatesGroup):
     # Shared first steps
     content_type_select = State()   # Обложка vs Внутренние слайды
+    ai_model_select = State()       # Nano Banana Pro vs ChatGPT Image
     ref_photo = State()
     mode_select = State()
 
@@ -128,6 +130,7 @@ class MultiplyFeedbackForm(StatesGroup):
 
 
 class SlideForm(StatesGroup):
+    ai_model_select = State()       # Nano Banana Pro vs ChatGPT Image
     type_select = State()           # с референса / с ноля
     competitor_slide = State()      # фото слайда конкурента (только "с референса")
     product_search = State()        # поиск товара в базе
@@ -251,6 +254,16 @@ BANNER_POST_GEN_KB = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔄 Ещё такие же баннеры")],
         [KeyboardButton(text="✏️ Изменить дизайнерский запрос")],
+        [KeyboardButton(text=RESTART_BTN)],
+    ],
+    resize_keyboard=True,
+)
+
+AI_MODEL_KB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🍌 Nano Banana Pro")],
+        [KeyboardButton(text="✨ ChatGPT Image")],
+        [KeyboardButton(text=BACK_BTN)],
         [KeyboardButton(text=RESTART_BTN)],
     ],
     resize_keyboard=True,
@@ -469,8 +482,17 @@ async def handle_back(message: Message, state: FSMContext):
     current = await state.get_state()
     data = await state.get_data()
 
+    # Model select
+    if current == CoverForm.ai_model_select.state:
+        await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
+        await state.set_state(CoverForm.content_type_select)
+
+    elif current == SlideForm.ai_model_select.state:
+        await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
+        await state.set_state(CoverForm.content_type_select)
+
     # DB flow
-    if current == CoverForm.product_search.state:
+    elif current == CoverForm.product_search.state:
         await message.answer("Выберите режим:", reply_markup=MODE_KB)
         await state.set_state(CoverForm.mode_select)
 
@@ -580,8 +602,8 @@ async def handle_back(message: Message, state: FSMContext):
 
     # Slides flow
     elif current == SlideForm.type_select.state:
-        await message.answer("Что хотите создать?", reply_markup=PRODUCT_TYPE_KB)
-        await state.set_state(CoverForm.content_type_select)
+        await message.answer("Выберите нейросеть для генерации:", reply_markup=AI_MODEL_KB)
+        await state.set_state(SlideForm.ai_model_select)
 
     elif current == SlideForm.competitor_slide.state:
         await message.answer("Выберите способ создания слайда:", reply_markup=SLIDE_TYPE_KB)
@@ -687,6 +709,25 @@ async def _start_form(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.content_type_select, F.text == "🖼 Обложка для маркетплейса")
 async def product_type_cover(message: Message, state: FSMContext):
+    await message.answer("Выберите нейросеть для генерации:", reply_markup=AI_MODEL_KB)
+    await state.set_state(CoverForm.ai_model_select)
+
+
+@dp.message(CoverForm.ai_model_select, F.text == "🍌 Nano Banana Pro")
+async def cover_model_piapi(message: Message, state: FSMContext):
+    await state.update_data(ai_model="piapi")
+    await message.answer(
+        "Отправьте <b>референсное фото товара</b> (упаковка/банка).\n"
+        "Этот шаг обязателен — пропустить нельзя.",
+        parse_mode="HTML",
+        reply_markup=RESTART_KB,
+    )
+    await state.set_state(CoverForm.ref_photo)
+
+
+@dp.message(CoverForm.ai_model_select, F.text == "✨ ChatGPT Image")
+async def cover_model_gpt(message: Message, state: FSMContext):
+    await state.update_data(ai_model="gptimage")
     await message.answer(
         "Отправьте <b>референсное фото товара</b> (упаковка/банка).\n"
         "Этот шаг обязателен — пропустить нельзя.",
@@ -698,10 +739,21 @@ async def product_type_cover(message: Message, state: FSMContext):
 
 @dp.message(CoverForm.content_type_select, F.text == "📑 Внутренние слайды")
 async def product_type_slides(message: Message, state: FSMContext):
-    await message.answer(
-        "Выберите способ создания слайда:",
-        reply_markup=SLIDE_TYPE_KB,
-    )
+    await message.answer("Выберите нейросеть для генерации:", reply_markup=AI_MODEL_KB)
+    await state.set_state(SlideForm.ai_model_select)
+
+
+@dp.message(SlideForm.ai_model_select, F.text == "🍌 Nano Banana Pro")
+async def slide_model_piapi(message: Message, state: FSMContext):
+    await state.update_data(ai_model="piapi")
+    await message.answer("Выберите способ создания слайда:", reply_markup=SLIDE_TYPE_KB)
+    await state.set_state(SlideForm.type_select)
+
+
+@dp.message(SlideForm.ai_model_select, F.text == "✨ ChatGPT Image")
+async def slide_model_gpt(message: Message, state: FSMContext):
+    await state.update_data(ai_model="gptimage")
+    await message.answer("Выберите способ создания слайда:", reply_markup=SLIDE_TYPE_KB)
     await state.set_state(SlideForm.type_select)
 
 
@@ -1562,15 +1614,22 @@ async def _fresh_ref_urls(ref_file_ids: list[str]) -> list[str]:
 
 
 async def _send_image(
-    target: Message, url: str, prompt: str, label: str,
+    target: Message,
+    url: str | None,
+    prompt: str,
+    label: str,
     ref_file_ids: list[str] | None = None,
     meta: dict | None = None,
     crop_size: tuple[int, int] | None = None,
+    img_bytes: bytes | None = None,
+    ai_model: str = "piapi",
 ):
     image_id = uuid.uuid4().hex[:10]
     entry: dict = {
-        "prompt": prompt, "url": url,
+        "prompt": prompt,
+        "url": url,
         "ref_file_ids": ref_file_ids or [],
+        "ai_model": ai_model,
         **(meta or {}),
     }
     if crop_size:
@@ -1579,13 +1638,23 @@ async def _send_image(
     _image_store[image_id] = entry
     has_line = bool(meta and meta.get("line"))
     caption = f"{label}\n\n<i>{prompt[:800]}</i>"
+    kb = _image_kb(image_id, has_line=has_line, has_crop=bool(crop_size))
     try:
-        await target.answer_photo(
-            photo=url,
-            caption=caption,
-            parse_mode="HTML",
-            reply_markup=_image_kb(image_id, has_line=has_line, has_crop=bool(crop_size)),
-        )
+        if img_bytes:
+            sent = await target.answer_photo(
+                photo=BufferedInputFile(img_bytes, filename="cover.png"),
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
+            entry["tg_file_id"] = sent.photo[-1].file_id
+        else:
+            await target.answer_photo(
+                photo=url,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
     except Exception:
         await target.answer(f"{label}: фото готово, но не удалось отправить.")
 
@@ -1647,39 +1716,76 @@ async def run_pipeline(message: Message, data: dict):
         await message.answer("Хотите попробовать ещё раз?", reply_markup=AGAIN_KB)
         return
 
+    ai_model: str = data.get("ai_model", "piapi")
+    model_name = "ChatGPT Image" if ai_model == "gptimage" else "Nano Banana Pro"
+
     await status.edit_text(
-        f"{len(prompts)} промтов готовы! Отправляю в Nano Banana Pro…\n"
+        f"{len(prompts)} промтов готовы! Отправляю в {model_name}…\n"
         "Обычно занимает 1–2 минуты."
     )
 
     ref_file_ids = photo_ids[:4]
-    ref_urls = await _fresh_ref_urls(ref_file_ids)
-
     selected_prompts = prompts[:count]
     done = {"n": 0, "ok": 0}
 
-    async def gen_and_send(idx: int, prompt: str):
-        try:
-            url = await piapi_client.generate_image(prompt, ref_urls or None)
-        except Exception as e:
-            logging.error("generate_image idx=%d error: %s", idx, e)
-            url = None
-        done["n"] += 1
-        if url:
-            done["ok"] += 1
+    if ai_model == "gptimage":
+        ref_img_bytes: list[bytes] = []
+        for fid in ref_file_ids:
             try:
-                await _send_image(message, url, prompt, f"Вариант {idx}/{count}", ref_file_ids, meta=_pipe_meta)
-            except Exception as e:
-                logging.error("_send_image idx=%d error: %s", idx, e)
-        else:
-            try:
-                await message.answer(f"Вариант {idx}: генерация не удалась.")
+                f = await bot.get_file(fid)
+                buf = await bot.download_file(f.file_path)
+                ref_img_bytes.append(buf.read())
             except Exception:
                 pass
-        try:
-            await status.edit_text(f"Обработано {done['n']}/{count} | Готово: {done['ok']}")
-        except Exception:
-            pass
+
+        async def gen_and_send(idx: int, prompt: str):
+            try:
+                ib = await gpt_image_client.generate_image(prompt, ref_img_bytes or None, "3:4")
+            except Exception as e:
+                logging.error("gpt_image idx=%d error: %s", idx, e)
+                ib = None
+            done["n"] += 1
+            if ib:
+                done["ok"] += 1
+                try:
+                    await _send_image(
+                        message, None, prompt, f"Вариант {idx}/{count}",
+                        ref_file_ids, meta=_pipe_meta,
+                        img_bytes=ib, ai_model="gptimage",
+                    )
+                except Exception as e:
+                    logging.error("_send_image idx=%d error: %s", idx, e)
+            else:
+                await message.answer(f"Вариант {idx}: генерация не удалась.")
+            try:
+                await status.edit_text(f"Обработано {done['n']}/{count} | Готово: {done['ok']}")
+            except Exception:
+                pass
+    else:
+        ref_urls = await _fresh_ref_urls(ref_file_ids)
+
+        async def gen_and_send(idx: int, prompt: str):
+            try:
+                url = await piapi_client.generate_image(prompt, ref_urls or None)
+            except Exception as e:
+                logging.error("generate_image idx=%d error: %s", idx, e)
+                url = None
+            done["n"] += 1
+            if url:
+                done["ok"] += 1
+                try:
+                    await _send_image(message, url, prompt, f"Вариант {idx}/{count}", ref_file_ids, meta=_pipe_meta)
+                except Exception as e:
+                    logging.error("_send_image idx=%d error: %s", idx, e)
+            else:
+                try:
+                    await message.answer(f"Вариант {idx}: генерация не удалась.")
+                except Exception:
+                    pass
+            try:
+                await status.edit_text(f"Обработано {done['n']}/{count} | Готово: {done['ok']}")
+            except Exception:
+                pass
 
     try:
         await asyncio.gather(*[gen_and_send(i + 1, p) for i, p in enumerate(selected_prompts)])
@@ -1721,26 +1827,53 @@ async def multiply_idea(
         await query.answer("Данные не найдены — перезапустите генерацию.", show_alert=True)
         return
 
+    ai_model = data.get("ai_model", "piapi")
+    model_name = "ChatGPT Image" if ai_model == "gptimage" else "Nano Banana Pro"
     await query.answer("Генерирую 3 похожих варианта…")
-    status = await query.message.answer("Генерирую 3 похожих обложки…")
+    status = await query.message.answer(f"Генерирую 3 похожих обложки через {model_name}…")
     prompt = data["prompt"]
     done = {"n": 0, "ok": 0}
-
     ref_file_ids = data.get("ref_file_ids") or []
-    ref_urls = await _fresh_ref_urls(ref_file_ids)
 
-    async def gen_and_send(idx: int):
-        url = await piapi_client.generate_image(prompt, ref_urls or None)
-        done["n"] += 1
-        if url:
-            done["ok"] += 1
-            await _send_image(query.message, url, prompt, f"Размножение {idx}/3", ref_file_ids)
-        else:
-            await query.message.answer(f"Размножение {idx}: генерация не удалась.")
-        try:
-            await status.edit_text(f"Обработано {done['n']}/3 | Готово: {done['ok']}")
-        except Exception:
-            pass
+    if ai_model == "gptimage":
+        ref_img_bytes: list[bytes] = []
+        for fid in ref_file_ids:
+            try:
+                url = await _tg_url(fid)
+                if url:
+                    async with httpx.AsyncClient(timeout=30) as hc:
+                        r = await hc.get(url)
+                        ref_img_bytes.append(r.content)
+            except Exception:
+                pass
+
+        async def gen_and_send(idx: int):
+            ib = await gpt_image_client.generate_image(prompt, ref_img_bytes or None)
+            done["n"] += 1
+            if ib:
+                done["ok"] += 1
+                await _send_image(query.message, None, prompt, f"Размножение {idx}/3", ref_file_ids, img_bytes=ib, ai_model="gptimage")
+            else:
+                await query.message.answer(f"Размножение {idx}: генерация не удалась.")
+            try:
+                await status.edit_text(f"Обработано {done['n']}/3 | Готово: {done['ok']}")
+            except Exception:
+                pass
+    else:
+        ref_urls = await _fresh_ref_urls(ref_file_ids)
+
+        async def gen_and_send(idx: int):
+            url = await piapi_client.generate_image(prompt, ref_urls or None)
+            done["n"] += 1
+            if url:
+                done["ok"] += 1
+                await _send_image(query.message, url, prompt, f"Размножение {idx}/3", ref_file_ids)
+            else:
+                await query.message.answer(f"Размножение {idx}: генерация не удалась.")
+            try:
+                await status.edit_text(f"Обработано {done['n']}/3 | Готово: {done['ok']}")
+            except Exception:
+                pass
 
     await asyncio.gather(*[gen_and_send(i + 1) for i in range(3)])
 
@@ -1866,8 +1999,8 @@ async def run_fix_pipeline(
     correction: str,
     extra_ref_file_id: str | None,
 ):
-    original_url = image_data["url"]
     ref_file_ids: list[str] = image_data.get("ref_file_ids", [])
+    ai_model = image_data.get("ai_model", "piapi")
 
     fix_prompt = (
         f"Возьми изображение как основу и внеси следующие исправления: {correction}. "
@@ -1876,26 +2009,62 @@ async def run_fix_pipeline(
         f"высококачественная коммерческая обложка для маркетплейса."
     )
 
-    # Fresh URLs: original generated image + fresh Telegram ref + extra ref photo
-    image_urls = [original_url]
-    fresh_refs = await _fresh_ref_urls(ref_file_ids)
-    image_urls.extend(fresh_refs)
-    if extra_ref_file_id:
-        extra_url = await _tg_url(extra_ref_file_id)
-        if extra_url:
-            image_urls.append(extra_url)
-
     status = await message.answer("Исправляю изображение…")
-    url = await piapi_client.generate_image(fix_prompt, image_urls)
-    if url:
-        await _send_image(message, url, fix_prompt, "Исправленный вариант", ref_file_ids)
-        try:
-            await status.delete()
-        except Exception:
-            pass
-        await message.answer("Хотите сделать ещё одну серию?", reply_markup=AGAIN_KB)
+
+    if ai_model == "gptimage":
+        img_bytes_list: list[bytes] = []
+        tg_file_id = image_data.get("tg_file_id")
+        async with httpx.AsyncClient(timeout=60) as hc:
+            if tg_file_id:
+                u = await _tg_url(tg_file_id)
+                if u:
+                    try:
+                        img_bytes_list.append((await hc.get(u)).content)
+                    except Exception:
+                        pass
+            for fid in ref_file_ids:
+                u = await _tg_url(fid)
+                if u:
+                    try:
+                        img_bytes_list.append((await hc.get(u)).content)
+                    except Exception:
+                        pass
+            if extra_ref_file_id:
+                u = await _tg_url(extra_ref_file_id)
+                if u:
+                    try:
+                        img_bytes_list.append((await hc.get(u)).content)
+                    except Exception:
+                        pass
+        ib = await gpt_image_client.generate_image(fix_prompt, img_bytes_list or None)
+        if ib:
+            await _send_image(message, None, fix_prompt, "Исправленный вариант", ref_file_ids, img_bytes=ib, ai_model="gptimage")
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        else:
+            await status.edit_text("Не удалось исправить изображение. Попробуйте ещё раз.")
     else:
-        await status.edit_text("Не удалось исправить изображение. Попробуйте ещё раз.")
+        original_url = image_data.get("url")
+        image_urls = []
+        if original_url:
+            image_urls.append(original_url)
+        fresh_refs = await _fresh_ref_urls(ref_file_ids)
+        image_urls.extend(fresh_refs)
+        if extra_ref_file_id:
+            extra_url = await _tg_url(extra_ref_file_id)
+            if extra_url:
+                image_urls.append(extra_url)
+        url = await piapi_client.generate_image(fix_prompt, image_urls)
+        if url:
+            await _send_image(message, url, fix_prompt, "Исправленный вариант", ref_file_ids)
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        else:
+            await status.edit_text("Не удалось исправить изображение. Попробуйте ещё раз.")
 
 
 # --- Scale to line colors ---
@@ -2194,38 +2363,63 @@ async def run_slide_pipeline(message: Message, state: FSMContext, data: dict):
         await message.answer("Попробуйте ещё раз:", reply_markup=SLIDE_POST_GEN_KB)
         return
 
-    await status.edit_text(f"{len(prompts)} промта готово! Отправляю в Nano Banana Pro…")
+    ai_model: str = data.get("ai_model", "piapi")
+    model_name = "ChatGPT Image" if ai_model == "gptimage" else "Nano Banana Pro"
+    await status.edit_text(f"{len(prompts)} промта готово! Отправляю в {model_name}…")
 
     render_fid = data.get("slide_render_fid")
     competitor_fid = data.get("slide_competitor_fid")
-
     ref_fids = []
     if competitor_fid:
         ref_fids.append(competitor_fid)
     if render_fid:
         ref_fids.append(render_fid)
 
-    ref_urls = await _fresh_ref_urls(ref_fids) if ref_fids else []
-
     done = {"n": 0, "ok": 0}
+    total = len(prompts)
 
-    async def gen_slide(idx: int, prompt: str):
-        url = await piapi_client.generate_image(prompt, ref_urls or None)
-        done["n"] += 1
-        if url:
-            done["ok"] += 1
-            await _send_image(message, url, prompt, f"Слайд {idx}/{len(prompts)}", ref_fids)
-        else:
-            await message.answer(f"Слайд {idx}: генерация не удалась.")
-        try:
-            await status.edit_text(f"Обработано {done['n']}/{len(prompts)} | Готово: {done['ok']}")
-        except Exception:
-            pass
+    if ai_model == "gptimage":
+        ref_img_bytes: list[bytes] = []
+        for fid in ref_fids:
+            try:
+                f = await bot.get_file(fid)
+                buf = await bot.download_file(f.file_path)
+                ref_img_bytes.append(buf.read())
+            except Exception:
+                pass
+
+        async def gen_slide(idx: int, prompt: str):
+            ib = await gpt_image_client.generate_image(prompt, ref_img_bytes or None, "3:4")
+            done["n"] += 1
+            if ib:
+                done["ok"] += 1
+                await _send_image(message, None, prompt, f"Слайд {idx}/{total}", ref_fids, img_bytes=ib, ai_model="gptimage")
+            else:
+                await message.answer(f"Слайд {idx}: генерация не удалась.")
+            try:
+                await status.edit_text(f"Обработано {done['n']}/{total} | Готово: {done['ok']}")
+            except Exception:
+                pass
+    else:
+        ref_urls = await _fresh_ref_urls(ref_fids) if ref_fids else []
+
+        async def gen_slide(idx: int, prompt: str):
+            url = await piapi_client.generate_image(prompt, ref_urls or None)
+            done["n"] += 1
+            if url:
+                done["ok"] += 1
+                await _send_image(message, url, prompt, f"Слайд {idx}/{total}", ref_fids)
+            else:
+                await message.answer(f"Слайд {idx}: генерация не удалась.")
+            try:
+                await status.edit_text(f"Обработано {done['n']}/{total} | Готово: {done['ok']}")
+            except Exception:
+                pass
 
     await asyncio.gather(*[gen_slide(i + 1, p) for i, p in enumerate(prompts)])
 
     try:
-        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/{len(prompts)} слайдов.")
+        await status.edit_text(f"Готово! Сгенерировано {done['ok']}/{total} слайдов.")
     except Exception:
         pass
 
@@ -2234,8 +2428,9 @@ async def run_slide_pipeline(message: Message, state: FSMContext, data: dict):
     await state.set_state(SlideForm.post_gen)
 
     if done["ok"] == 0:
+        err_hint = "Проверьте баланс PiAPI." if ai_model == "piapi" else "Проверьте баланс OpenAI."
         await message.answer(
-            "⚠️ Ни один слайд не сгенерировался. Проверьте баланс PiAPI.",
+            f"⚠️ Ни один слайд не сгенерировался. {err_hint}",
             reply_markup=SLIDE_POST_GEN_KB,
         )
     else:
