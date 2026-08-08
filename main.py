@@ -1798,13 +1798,14 @@ async def run_pipeline(message: Message, data: dict):
         pass
 
     if done["ok"] == 0:
+        if ai_model == "piapi" and piapi_client.last_error:
+            err_detail = f"\n\nОшибка API: <code>{piapi_client.last_error}</code>"
+        else:
+            err_detail = ""
+        svc = "OpenAI" if ai_model == "gptimage" else "PiAPI (Nano Banana Pro)"
         await message.answer(
-            "⚠️ Ни одно изображение не сгенерировалось.\n"
-            "Возможные причины:\n"
-            "• Недостаточно баланса на PiAPI\n"
-            "• Сервис PiAPI временно недоступен\n"
-            "• Неверный тип задачи (TASK_TYPE)\n\n"
-            "Проверьте логи Railway для деталей.",
+            f"⚠️ Ни одно изображение не сгенерировалось ({svc}).{err_detail}",
+            parse_mode="HTML",
             reply_markup=AGAIN_KB,
         )
     else:
@@ -2428,9 +2429,14 @@ async def run_slide_pipeline(message: Message, state: FSMContext, data: dict):
     await state.set_state(SlideForm.post_gen)
 
     if done["ok"] == 0:
-        err_hint = "Проверьте баланс PiAPI." if ai_model == "piapi" else "Проверьте баланс OpenAI."
+        if ai_model == "piapi" and piapi_client.last_error:
+            err_detail = f"\n\nОшибка API: <code>{piapi_client.last_error}</code>"
+        else:
+            err_detail = ""
+        svc = "OpenAI" if ai_model == "gptimage" else "PiAPI (Nano Banana Pro)"
         await message.answer(
-            f"⚠️ Ни один слайд не сгенерировался. {err_hint}",
+            f"⚠️ Ни один слайд не сгенерировался ({svc}).{err_detail}",
+            parse_mode="HTML",
             reply_markup=SLIDE_POST_GEN_KB,
         )
     else:
@@ -2560,8 +2566,10 @@ async def run_banner_pipeline(message: Message, state: FSMContext, data: dict):
     await state.set_state(BannerForm.post_gen)
 
     if done["ok"] == 0:
+        err_detail = f"\n\nОшибка API: <code>{piapi_client.last_error}</code>" if piapi_client.last_error else ""
         await message.answer(
-            "⚠️ Ни один баннер не сгенерировался. Проверьте баланс PiAPI.",
+            f"⚠️ Ни один баннер не сгенерировался (PiAPI).{err_detail}",
+            parse_mode="HTML",
             reply_markup=BANNER_POST_GEN_KB,
         )
     else:

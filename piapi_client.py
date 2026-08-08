@@ -12,7 +12,7 @@ def _headers() -> dict:
     return {"X-API-Key": config.PIAPI_KEY, "Content-Type": "application/json"}
 
 
-async def _submit(prompt: str, image_urls: list[str] | None, aspect_ratio: str | None = None) -> str | None:
+async def _submit(prompt: str, image_urls: list[str] | None, aspect_ratio: str | None = None) -> tuple[str | None, str | None]:
     payload: dict = {
         "model": "gemini",
         "task_type": config.TASK_TYPE,
@@ -34,15 +34,16 @@ async def _submit(prompt: str, image_urls: list[str] | None, aspect_ratio: str |
         code = data.get("code")
         logger.info("PiAPI submit http=%s code=%s task_type=%s", r.status_code, code, config.TASK_TYPE)
         if code != 200:
+            err = data.get("message") or data.get("error") or str(data)[:300]
             logger.error("PiAPI submit FULL response: %s", data)
-            return None
+            return None, err
 
         task_id = data["data"]["task_id"]
         logger.info("PiAPI submit OK task_id=%s", task_id)
-        return task_id
+        return task_id, None
     except Exception as e:
         logger.exception("PiAPI submit exception: %s", e)
-        return None
+        return None, str(e)
 
 
 async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | None:
@@ -81,23 +82,28 @@ async def _poll(task_id: str, timeout: int = 180, interval: int = 5) -> str | No
 
 # Лимит одновременно активных задач в PiAPI (submit + ожидание результата)
 _sem = asyncio.Semaphore(3)
+last_error: str = ""   # last human-readable error, readable from run_pipeline
 
 
 async def generate_image(prompt: str, image_urls: list[str] | None = None, aspect_ratio: str | None = None) -> str | None:
+    global last_error
     async with _sem:
         for attempt in range(3):
             logger.info("PiAPI generate attempt=%d image_urls_count=%d", attempt + 1, len(image_urls or []))
-            task_id = await _submit(prompt, image_urls, aspect_ratio)
+            task_id, submit_err = await _submit(prompt, image_urls, aspect_ratio)
             if not task_id:
+                last_error = submit_err or "submit failed"
                 wait = (attempt + 1) * 5
-                logger.warning("PiAPI submit failed attempt=%d, retry in %ds", attempt + 1, wait)
+                logger.warning("PiAPI submit failed attempt=%d error=%s retry in %ds", attempt + 1, last_error, wait)
                 await asyncio.sleep(wait)
                 continue
 
             url = await _poll(task_id)
             if url:
+                last_error = ""
                 return url
 
+            last_error = f"task {task_id} failed/timed out"
             logger.warning("PiAPI poll returned None attempt=%d task_id=%s", attempt + 1, task_id)
             await asyncio.sleep((attempt + 1) * 5)
 
