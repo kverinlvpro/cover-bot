@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import io
 import logging
 
 from openai import AsyncOpenAI
@@ -10,6 +9,16 @@ logger = logging.getLogger(__name__)
 
 _sem = asyncio.Semaphore(2)
 last_error: str = ""
+
+
+def _as_file_tuple(data: bytes) -> tuple[str, bytes, str]:
+    if data[:3] == b'\xff\xd8\xff':
+        return ("image.jpg", data, "image/jpeg")
+    if data[:8] == b'\x89PNG\r\n\x1a\n':
+        return ("image.png", data, "image/png")
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return ("image.webp", data, "image/webp")
+    return ("image.png", data, "image/png")
 
 _SIZE_MAP = {
     "3:4":  "1536x2048",
@@ -31,10 +40,10 @@ async def generate_image(
     async with _sem:
         try:
             if image_bytes_list:
-                images = [io.BytesIO(b) for b in image_bytes_list[:4]]
+                files = [_as_file_tuple(b) for b in image_bytes_list[:4]]
                 response = await client.images.edit(
                     model="gpt-image-2",
-                    image=images if len(images) > 1 else images[0],
+                    image=files if len(files) > 1 else files[0],
                     prompt=prompt,
                     size=size,
                     quality="high",
