@@ -112,6 +112,7 @@ class CoverForm(StatesGroup):
     paint_type_select = State()
     flexible_color_samples = State()
     color_code = State()            # optional color code step (flexible, wall paint)
+    wall_photos = State()           # live photos of paint on the wall (walls only)
     product_name = State()
     volume = State()
     headline = State()
@@ -559,11 +560,18 @@ async def handle_back(message: Message, state: FSMContext):
         )
         await state.set_state(CoverForm.flexible_color_samples)
 
+    elif current == CoverForm.wall_photos.state:
+        await message.answer("Введите код цвета:", reply_markup=COLOR_CODE_KB)
+        await state.set_state(CoverForm.color_code)
+
     elif current == CoverForm.product_name.state:
         paint_type = data.get("paint_type", "furniture")
         if paint_type == "walls":
-            await message.answer("Введите код цвета:", reply_markup=COLOR_CODE_KB)
-            await state.set_state(CoverForm.color_code)
+            await message.answer(
+                "📸 Загрузите живые фото краски на стене или нажмите «Пропустить»:",
+                reply_markup=COLOR_SAMPLES_KB,
+            )
+            await state.set_state(CoverForm.wall_photos)
         else:
             await message.answer("Выберите тип краски:", reply_markup=PAINT_TYPE_KB)
             await state.set_state(CoverForm.paint_type_select)
@@ -1370,16 +1378,67 @@ async def flexible_color_bad(message: Message):
     )
 
 
-@dp.message(CoverForm.color_code, F.text)
-async def step_color_code(message: Message, state: FSMContext):
-    text = message.text.strip()
-    await state.update_data(color_code=None if text == "Пропустить" else text)
+@dp.message(CoverForm.wall_photos, F.photo)
+async def wall_photo_handler(message: Message, state: FSMContext):
+    data = await state.get_data()
+    ids = list(data.get("wall_photo_ids", []))
+    if len(ids) >= 4:
+        await message.answer(
+            "Достигнут лимит — 4 фото. Нажмите «Готово» для продолжения.",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        return
+    ids.append(message.photo[-1].file_id)
+    await state.update_data(wall_photo_ids=ids)
+    await message.answer(
+        f"Фото {len(ids)} загружено. Добавьте ещё или нажмите «Готово».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.wall_photos, F.text.in_({"✅ Готово", "Пропустить"}))
+async def wall_photo_done(message: Message, state: FSMContext):
+    if message.text == "Пропустить":
+        await state.update_data(wall_photo_ids=[])
     await message.answer(
         "Введите <b>название товара</b>:",
         parse_mode="HTML",
         reply_markup=BACK_RESTART_KB,
     )
     await state.set_state(CoverForm.product_name)
+
+
+@dp.message(CoverForm.wall_photos)
+async def wall_photo_bad(message: Message):
+    await message.answer(
+        "Отправьте фото стены или нажмите «Готово» / «Пропустить».",
+        reply_markup=COLOR_SAMPLES_KB,
+    )
+
+
+@dp.message(CoverForm.color_code, F.text)
+async def step_color_code(message: Message, state: FSMContext):
+    text = message.text.strip()
+    await state.update_data(color_code=None if text == "Пропустить" else text)
+    data = await state.get_data()
+    if data.get("paint_type") == "walls":
+        await message.answer(
+            "📸 <b>Живые фото краски на стене</b>\n"
+            "Загрузите до 4 фото того, как краска выглядит на стене — "
+            "это поможет нейросети точнее попасть в оттенок.\n"
+            "Когда всё загружено — нажмите «Готово». Или нажмите «Пропустить».",
+            parse_mode="HTML",
+            reply_markup=COLOR_SAMPLES_KB,
+        )
+        await state.update_data(wall_photo_ids=[])
+        await state.set_state(CoverForm.wall_photos)
+    else:
+        await message.answer(
+            "Введите <b>название товара</b>:",
+            parse_mode="HTML",
+            reply_markup=BACK_RESTART_KB,
+        )
+        await state.set_state(CoverForm.product_name)
 
 
 @dp.message(CoverForm.product_name, F.text)
@@ -1665,6 +1724,7 @@ async def run_pipeline(message: Message, data: dict):
     user_request = _build_request(data)
     photo_ids: list[str] = data.get("photo_ids", [])
     color_photo_ids: list[str] = data.get("color_photo_ids", [])
+    wall_photo_ids: list[str] = data.get("wall_photo_ids", [])
     paint_type: str = data.get("paint_type", "furniture")
     count: int = data.get("cover_count", config.NUM_IMAGES)
     _pipe_meta = {
@@ -1695,12 +1755,23 @@ async def run_pipeline(message: Message, data: dict):
             except Exception:
                 pass
 
-    if paint_type == "walls" and color_image_bytes:
+    wall_image_bytes: list[bytes] = []
+    if paint_type == "walls" and wall_photo_ids:
+        for fid in wall_photo_ids[:4]:
+            try:
+                file = await bot.get_file(fid)
+                buf = await bot.download_file(file.file_path)
+                wall_image_bytes.append(buf.read())
+            except Exception:
+                pass
+
+    all_color_bytes = color_image_bytes + wall_image_bytes
+    if paint_type == "walls" and all_color_bytes:
         try:
             await status.edit_text("Анализирую оттенок краски…")
-            color_description = await claude_client.analyze_color_samples(color_image_bytes)
+            color_description = await claude_client.analyze_color_samples(all_color_bytes)
             logging.info("color_description: %s", color_description)
-            user_request += f"\n\nТочный оттенок краски (определён по образцам): {color_description}"
+            user_request += f"\n\nТочный оттенок краски (определён по фото): {color_description}"
         except Exception as e:
             logging.warning("analyze_color_samples failed: %s", e)
 
@@ -1708,7 +1779,7 @@ async def run_pipeline(message: Message, data: dict):
         prompts = await claude_client.generate_prompts(
             user_request,
             image_bytes,
-            color_image_bytes or None,
+            all_color_bytes or None,
             paint_type,
         )
     except Exception as e:
@@ -1724,7 +1795,8 @@ async def run_pipeline(message: Message, data: dict):
         "Обычно занимает 1–2 минуты."
     )
 
-    ref_file_ids = photo_ids[:4]
+    # Живые фото стены идут первыми (самый точный цветовой референс)
+    ref_file_ids = (wall_photo_ids + photo_ids)[:4]
     selected_prompts = prompts[:count]
     done = {"n": 0, "ok": 0}
 
