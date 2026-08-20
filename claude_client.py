@@ -127,7 +127,7 @@ async def generate_prompts(
 
     response = await client.chat.completions.create(
         model="gpt-4o",
-        max_tokens=4096,
+        max_tokens=2048,
         messages=[
             {"role": "system", "content": system},
             {"role": "user", "content": content},
