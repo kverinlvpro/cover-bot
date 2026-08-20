@@ -97,7 +97,7 @@ async def analyze_color_samples(color_image_bytes: list[bytes]) -> str:
         ),
     })
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         max_tokens=200,
         messages=[{"role": "user", "content": content}],
     )
@@ -126,7 +126,7 @@ async def generate_prompts(
     content.append({"type": "text", "text": user_request})
 
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         max_tokens=2048,
         messages=[
             {"role": "system", "content": system},
@@ -213,7 +213,7 @@ async def generate_banner_prompts(user_request: str, aspect_ratio: str = "16:9")
     client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         max_tokens=2048,
         messages=[
             {"role": "system", "content": system},
@@ -244,7 +244,7 @@ async def generate_slide_prompts(
     client = AsyncOpenAI(api_key=config.OPENAI_API_KEY)
 
     response = await client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         max_tokens=2048,
         messages=[
             {"role": "system", "content": _SLIDE_SYSTEM_PROMPT},
